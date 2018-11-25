@@ -231,7 +231,23 @@ int main(int argc, char** argv)
     big_file_entry* big_files = (big_file_entry*)&big_hashes[off4_header.entries_big];
     for (int i = 0; i < off4_header.entries_bigfiles_1 + off4_header.entries_bigfiles_2; i++)
     {
-        //printf("%06x: %016llx decomp %08x comp %08x unks %08x %08x %08x\n", i, big_files[i].offset, big_files[i].decomp_size, big_files[i].comp_size, big_files[i].unk, big_files[i].unk2, big_files[i].unk3);
+        printf("%06x: %016llx decomp %08x comp %08x unks %08x %08x %08x\n", i, big_files[i].offset, big_files[i].decomp_size, big_files[i].comp_size, big_files[i].unk, big_files[i].unk2, big_files[i].unk3);
+        
+        if (!big_files[i].comp_size) continue;
+
+        char tmp[0x100];
+        snprintf(tmp, 0x100, "%s_extract_raw/%u", argv[1], i);
+        FILE* part = fopen(tmp, "wb");
+        if (!part) continue;
+        
+        void* data = malloc(big_files[i].comp_size);
+        
+        fseek(f, header.offset_2 + big_files[i].offset, SEEK_SET);
+        fread(data, big_files[i].comp_size, 1, f);
+        fwrite(data, big_files[i].comp_size, 1, part);
+        
+        free(data);
+        fclose(part);
     }
     
     printf("Hash table 4:\n");
