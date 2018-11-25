@@ -616,7 +616,7 @@ lua2cpp_younglink.nro
 lua2cpp_zelda.nro
 lua2cpp_ptrainer.nro
 lua2cpp_item.nro
-multimedia.nss
+multimedia.nro
 common
 bayonetta
 captain
@@ -719,3 +719,4 @@ lua2cpp
 msbt
 bcat
 ui/message
+temp
