@@ -1,3 +1,3 @@
 # arcshark
 
-`g++ -lz main.cpp && ./a.out data.arc`
+`g++ -lz -lzstd main.cpp && ./a.out data.arc`
