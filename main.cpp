@@ -147,6 +147,7 @@ typedef struct hash_bucket
 
 typedef struct offset4_structs
 {
+    void* off4_data;
     offset4_header* header;
     offset4_ext_header* ext_header;
     entry_triplet* bulkfile_category_info;
@@ -169,6 +170,7 @@ typedef struct offset4_structs
 
 typedef struct offset5_structs
 {
+    void* off5_data;
     offset5_header* header;
     entry_pair* folderhash_to_foldertree;
     folder_tree_entry* folder_tree;
@@ -176,6 +178,14 @@ typedef struct offset5_structs
     uint32_t* numbers;
     mini_tree_entry* tree_entries;
 } offset5_structs;
+
+typedef struct arc_section
+{
+    uint32_t data_start;
+    uint32_t decomp_size;
+    uint32_t comp_size;
+    uint32_t zstd_comp_size;
+} arc_section;
 
 #define TREE_ALIGN_MASK           0xfffe0
 #define TREE_ALIGN_LSHIFT         (5)
@@ -192,7 +202,7 @@ typedef struct offset5_structs
 #define SUBOFFSET_UND               0x01000000
 #define SUBOFFSET_COMPRESSED_LZ4    0x02000000
 #define SUBOFFSET_COMPRESSED_ZSTD   0x03000000
-//#define VERBOSE_PRINT
+#define VERBOSE_PRINT
 
 FILE* arc_file;
 arc_header arc_head;
@@ -288,14 +298,31 @@ tree_entry* file_lookup(const char* path)
     return &off4_structs.tree_entries[found->meta];
 }
 
-void dump_file(big_file_entry* bigfile, file_entry* suboffset, const char* outfile)
+bool zstd_decomp(void* comp, void* decomp, uint32_t comp_size, uint32_t decomp_size)
+{
+    ZSTD_resetDStream(dstream);
+
+    ZSTD_inBuffer input = {comp, comp_size, 0};
+    ZSTD_outBuffer output = {decomp, decomp_size, 0};
+
+    size_t decompressed = ZSTD_decompressStream(dstream, &output, &input);
+    if (ZSTD_isError(decompressed))
+    {
+        printf("err %s\n", ZSTD_getErrorName(decompressed));
+        return false;
+    }
+    
+    return true;
+}
+
+void dump_file(big_file_entry* bigfile, file_entry* suboffset, std::string outpath)
 {    
     if ((suboffset->flags & SUBOFFSET_COMPRESSION) == SUBOFFSET_DECOMPRESSED)
     {
-        FILE* part = fopen(outfile, "wb");
+        FILE* part = fopen(outpath.c_str(), "wb");
         if (!part)
         {
-            printf("Failed to open %s\n", outfile);
+            printf("Failed to open %s\n", outpath.c_str());
             return;
         }
 
@@ -313,7 +340,7 @@ void dump_file(big_file_entry* bigfile, file_entry* suboffset, const char* outfi
 
     if ((suboffset->flags & SUBOFFSET_COMPRESSION) != SUBOFFSET_COMPRESSED_ZSTD)
     {
-        printf("Failed to extract %s, unknown compression (%08x)\n", outfile, suboffset->flags & SUBOFFSET_COMPRESSION);
+        printf("Failed to extract %s, unknown compression (%08x)\n", outpath.c_str(), suboffset->flags & SUBOFFSET_COMPRESSION);
         return;
     }
 
@@ -323,36 +350,29 @@ void dump_file(big_file_entry* bigfile, file_entry* suboffset, const char* outfi
     fseek(arc_file, arc_head.offset_2 + bigfile->offset + (suboffset->offset * sizeof(uint32_t)), SEEK_SET);
     fread(data_comp, suboffset->comp_size, 1, arc_file);
 
-    ZSTD_resetDStream(dstream);
-
-    ZSTD_inBuffer input = {data_comp, suboffset->comp_size, 0};
-    ZSTD_outBuffer output = {data, suboffset->decomp_size, 0};
-
-    size_t decompressed = ZSTD_decompressStream(dstream, &output, &input);
-    if (ZSTD_isError(decompressed))
+    if (!zstd_decomp(data_comp, data, suboffset->comp_size, suboffset->decomp_size))
     {
-        printf("err %s\n", ZSTD_getErrorName(decompressed));
         free(data);
         free(data_comp);
         return;
     }
 
-    FILE* part = fopen(outfile, "wb");
+    FILE* part = fopen(outpath.c_str(), "wb");
     if (part)
     {
-        fwrite(output.dst, output.pos, 1, part);
+        fwrite(data, suboffset->decomp_size, 1, part);
         fclose(part);
     }
     else
     {
-        printf("Failed to open %s\n", outfile);
+        printf("Failed to open %s\n", outpath.c_str());
     }
 
     free(data);
     free(data_comp);
 }
 
-void dump_tree_entry(tree_entry* entry, const char* outpath)
+void dump_tree_entry(tree_entry* entry, std::string outpath)
 {
     big_hash_entry* bighash = &off4_structs.big_hashes[entry->path.meta];
     big_file_entry* bigfile = &off4_structs.big_files[bighash->path.meta];
@@ -360,6 +380,62 @@ void dump_tree_entry(tree_entry* entry, const char* outpath)
     print_big_file(bigfile);
 
     dump_file(bigfile, &off4_structs.suboffset_entries[entry->suboffset_index], outpath);
+}
+
+void calc_offset4_structs(offset4_structs* off4)
+{
+    off4->bulkfile_category_info = (entry_triplet*)&off4->ext_header[1];
+    off4->bulkfile_hash_lookup = (entry_pair*)&off4->bulkfile_category_info[off4->ext_header->bgm_unk_movie_entries];
+    off4->bulk_files_by_name = (entry_triplet*)&off4->bulkfile_hash_lookup[off4->ext_header->entries];
+    off4->bulkfile_lookup_to_fileidx = (uint32_t*)&off4->bulk_files_by_name[off4->ext_header->entries];
+    off4->file_pairs = (file_pair*)&off4->bulkfile_lookup_to_fileidx[off4->ext_header->entries_2];
+    off4->weird_hashes = (entry_triplet*)&off4->file_pairs[off4->ext_header->num_files];
+    off4->big_hashes = (big_hash_entry*)&off4->weird_hashes[off4->header->weird_hash_entries];
+    off4->big_files = (big_file_entry*)&off4->big_hashes[off4->header->entries_big];
+    off4->folder_hash_lookup = (entry_pair*)&off4->big_files[off4->header->entries_bigfiles_1 + off4->header->entries_bigfiles_2];
+    off4->tree_entries = (tree_entry*)&off4->folder_hash_lookup[off4->header->folder_hash_entries];
+    off4->suboffset_entries = (file_entry*)&off4->tree_entries[off4->header->tree_entries];
+    off4->post_suboffset_entries = (file_entry*)&off4->suboffset_entries[off4->header->suboffset_entries];
+    off4->folder_to_big_hash = (entry_pair*)&off4->post_suboffset_entries[off4->header->post_suboffset_entries];
+    off4->file_lookup_buckets = (hash_bucket*)&off4->folder_to_big_hash[off4->header->entries_big];
+    off4->file_lookup = (entry_pair*)&off4->file_lookup_buckets[off4->file_lookup_buckets->num_entries+1];
+    off4->numbers3 = (entry_pair*)&off4->file_lookup[off4->header->file_lookup_entries];
+}
+
+void expand_subfiles_bighash_bigfile()
+{
+    offset4_structs newvals = off4_structs;
+    
+    newvals.header->entries_big += 1;
+    newvals.header->post_suboffset_entries += 5;
+    
+    calc_offset4_structs(&newvals);
+    
+    memmove(newvals.numbers3, off4_structs.numbers3, off4_structs.header->tree_entries * sizeof(entry_pair));
+    memmove(newvals.file_lookup, off4_structs.file_lookup, off4_structs.header->file_lookup_entries * sizeof(entry_pair));
+    memmove(newvals.file_lookup_buckets, off4_structs.file_lookup_buckets, (off4_structs.file_lookup_buckets->num_entries+1) * sizeof(hash_bucket));
+    memmove(newvals.folder_to_big_hash, off4_structs.folder_to_big_hash, off4_structs.header->entries_big * sizeof(entry_pair));
+    memmove(newvals.post_suboffset_entries, off4_structs.post_suboffset_entries, off4_structs.header->post_suboffset_entries * sizeof(file_entry));
+    memmove(newvals.suboffset_entries, off4_structs.suboffset_entries, off4_structs.header->suboffset_entries * sizeof(file_entry));
+    memmove(newvals.tree_entries, off4_structs.tree_entries, off4_structs.header->tree_entries * sizeof(tree_entry));
+    memmove(newvals.folder_hash_lookup, off4_structs.folder_hash_lookup, off4_structs.header->folder_hash_entries * sizeof(entry_pair));
+    memmove(newvals.big_files, off4_structs.big_files, (off4_structs.header->entries_bigfiles_1 + off4_structs.header->entries_bigfiles_2) * sizeof(big_file_entry));
+    memmove(newvals.big_hashes, off4_structs.big_hashes, off4_structs.header->entries_big * sizeof(big_hash_entry));
+    memmove(newvals.weird_hashes, off4_structs.weird_hashes, off4_structs.header->weird_hash_entries * sizeof(entry_triplet));
+    memmove(newvals.file_pairs, off4_structs.file_pairs, off4_structs.ext_header->entries_2 * sizeof(file_pair));
+    memmove(newvals.bulkfile_lookup_to_fileidx, off4_structs.bulkfile_lookup_to_fileidx, off4_structs.ext_header->entries_2 * sizeof(uint32_t));
+    memmove(newvals.bulk_files_by_name, off4_structs.bulk_files_by_name, off4_structs.ext_header->entries * sizeof(entry_triplet));
+    memmove(newvals.bulkfile_hash_lookup, off4_structs.bulkfile_hash_lookup, off4_structs.ext_header->entries * sizeof(entry_pair));
+    memmove(newvals.bulkfile_category_info, off4_structs.bulkfile_category_info, off4_structs.ext_header->bgm_unk_movie_entries * sizeof(entry_triplet));
+    
+    off4_structs = newvals;
+}
+
+void dump_file(std::string filepath)
+{
+    tree_entry* entry = file_lookup(filepath.c_str());
+    print_tree_entry(entry);
+    dump_tree_entry(entry, unhash[entry->file.hash]);
 }
 
 int main(int argc, char** argv)
@@ -396,14 +472,38 @@ int main(int argc, char** argv)
     printf("Offset 6: %016llx\n\n", arc_head.offset_6);
     
     // Offset 4
-    off4_structs.header = (offset4_header*)malloc(sizeof(offset4_header));
-    off4_structs.ext_header = (offset4_ext_header*)malloc(sizeof(offset4_ext_header));
+    arc_section section;
     fseek(arc_file, arc_head.offset_4, SEEK_SET);
-    fread(off4_structs.header, 0x34, 1, arc_file);
-    fread(off4_structs.ext_header, 0x10, 1, arc_file);
+    fread(&section, sizeof(section), 1, arc_file);
+    
+    if (section.data_start < 0x100)
+    {
+        off4_structs.off4_data = malloc(section.decomp_size);
+        off4_structs.header = (offset4_header*)off4_structs.off4_data;
+        off4_structs.ext_header = (offset4_ext_header*)(off4_structs.off4_data + sizeof(offset4_header));
 
-    void* off4_data = malloc(off4_structs.header->total_size - 0x44);
-    fread(off4_data, off4_structs.header->total_size - 0x44, 1, arc_file);
+        void* comp_tmp = malloc(section.comp_size);
+        
+        fseek(arc_file, arc_head.offset_4 + section.data_start, SEEK_SET);
+        fread(comp_tmp, section.comp_size, 1, arc_file);
+        printf("%lx %x\n", section.data_start, *(uint32_t*)comp_tmp);
+        
+        zstd_decomp(comp_tmp, off4_structs.off4_data, section.zstd_comp_size, section.decomp_size);
+        
+        free(comp_tmp);
+    }
+    else
+    {
+        off4_structs.off4_data = malloc(section.data_start); // total_size
+        off4_structs.header = (offset4_header*)off4_structs.off4_data;
+        off4_structs.ext_header = (offset4_ext_header*)(off4_structs.off4_data + sizeof(offset4_header));
+        
+        fseek(arc_file, arc_head.offset_4, SEEK_SET);
+        fread(off4_structs.header, 0x34, 1, arc_file);
+        fread(off4_structs.ext_header, 0x10, 1, arc_file);
+
+        fread(off4_structs.off4_data + sizeof(offset4_header) + sizeof(offset4_ext_header), off4_structs.header->total_size - (sizeof(offset4_header) + sizeof(offset4_ext_header)), 1, arc_file);
+    }
     
     printf("Offset 4 Header:\n");
     printf("Total size: %08x\n", off4_structs.header->total_size);
@@ -427,27 +527,95 @@ int main(int argc, char** argv)
     printf("Number table entries: %08x\n", off4_structs.ext_header->entries_2);
     printf("Num files: %08x\n\n", off4_structs.ext_header->num_files);
     
-    off4_structs.bulkfile_category_info = (entry_triplet*)off4_data;
-    off4_structs.bulkfile_hash_lookup = (entry_pair*)&off4_structs.bulkfile_category_info[off4_structs.ext_header->bgm_unk_movie_entries];
-    off4_structs.bulk_files_by_name = (entry_triplet*)&off4_structs.bulkfile_hash_lookup[off4_structs.ext_header->entries];
-    off4_structs.bulkfile_lookup_to_fileidx = (uint32_t*)&off4_structs.bulk_files_by_name[off4_structs.ext_header->entries];
-    off4_structs.file_pairs = (file_pair*)&off4_structs.bulkfile_lookup_to_fileidx[off4_structs.ext_header->entries_2];
-    off4_structs.weird_hashes = (entry_triplet*)&off4_structs.file_pairs[off4_structs.ext_header->num_files];
-    off4_structs.big_hashes = (big_hash_entry*)&off4_structs.weird_hashes[off4_structs.header->weird_hash_entries];
-    off4_structs.big_files = (big_file_entry*)&off4_structs.big_hashes[off4_structs.header->entries_big];
-    off4_structs.folder_hash_lookup = (entry_pair*)&off4_structs.big_files[off4_structs.header->entries_bigfiles_1 + off4_structs.header->entries_bigfiles_2];
-    off4_structs.tree_entries = (tree_entry*)&off4_structs.folder_hash_lookup[off4_structs.header->folder_hash_entries];
-    off4_structs.suboffset_entries = (file_entry*)&off4_structs.tree_entries[off4_structs.header->tree_entries];
-    off4_structs.post_suboffset_entries = (file_entry*)&off4_structs.suboffset_entries[off4_structs.header->suboffset_entries];
-    off4_structs.folder_to_big_hash = (entry_pair*)&off4_structs.post_suboffset_entries[off4_structs.header->post_suboffset_entries];
-    off4_structs.file_lookup_buckets = (hash_bucket*)&off4_structs.folder_to_big_hash[off4_structs.header->entries_big];
-    off4_structs.file_lookup = (entry_pair*)&off4_structs.file_lookup_buckets[off4_structs.file_lookup_buckets->num_entries+1];
-    off4_structs.numbers3 = (entry_pair*)&off4_structs.file_lookup[off4_structs.header->file_lookup_entries];
+    calc_offset4_structs(&off4_structs);
+    
+    //expand_subfiles_bighash_bigfile();
     
     // Sample lookup
-    tree_entry* entry = file_lookup("prebuilt:/nro/release/lua2cpp_wolf.nro");
-    print_tree_entry(entry);
-    dump_tree_entry(entry, unhash[entry->file.hash].c_str());
+    /*dump_file("prebuilt:/nro/release/lua2cpp_common.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_bayonetta.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_captain.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_chrom.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_cloud.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_daisy.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_dedede.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_diddy.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_donkey.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_duckhunt.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_falco.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_fox.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_gamewatch.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_ganon.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_gaogaen.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_gekkouga.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_ike.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_inkling.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_kamui.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_ken.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_kirby.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_koopa.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_koopag.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_koopajr.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_krool.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_link.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_littlemac.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_lucario.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_lucas.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_lucina.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_luigi.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_mario.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_mariod.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_marth.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_metaknight.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_mewtwo.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_miienemyf.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_miienemyg.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_miienemys.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_miifighter.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_miigunner.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_miiswordsman.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_murabito.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_nana.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_ness.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_pacman.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_palutena.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_peach.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_pfushigisou.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_pichu.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_pikachu.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_pikmin.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_pit.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_pitb.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_plizardon.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_popo.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_purin.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_pzenigame.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_reflet.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_richter.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_ridley.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_robot.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_rockman.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_rosetta.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_roy.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_ryu.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_samus.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_samusd.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_sheik.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_shizue.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_shulk.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_simon.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_snake.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_sonic.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_szerosuit.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_toonlink.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_wario.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_wiifit.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_wolf.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_yoshi.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_younglink.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_zelda.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_ptrainer.nro");
+    dump_file("prebuilt:/nro/release/lua2cpp_item.nro");*/
     
     printf("Category hash to bulkfile count and idx:\n");
     for (int i = 0; i < off4_structs.ext_header->bgm_unk_movie_entries; i++)
@@ -596,12 +764,33 @@ int main(int argc, char** argv)
     
     
     // Offset 5
-    off5_structs.header = (offset5_header*)malloc(sizeof(offset5_header));
     fseek(arc_file, arc_head.offset_5, SEEK_SET);
-    fread(off5_structs.header, 0x14, 1, arc_file);
+    fread(&section, sizeof(section), 1, arc_file);
     
-    void* off5_data = malloc(off5_structs.header->total_size - 0x14);
-    fread(off5_data, off5_structs.header->total_size - 0x14, 1, arc_file);
+    if (section.data_start < 0x100)
+    {
+        off5_structs.off5_data = malloc(section.decomp_size);
+        off5_structs.header = (offset5_header*)off5_structs.off5_data;
+
+        void* comp_tmp = malloc(section.comp_size);
+        
+        fseek(arc_file, arc_head.offset_5 + section.data_start, SEEK_SET);
+        fread(comp_tmp, section.comp_size, 1, arc_file);
+        
+        zstd_decomp(comp_tmp, off5_structs.off5_data, section.zstd_comp_size, section.decomp_size);
+        
+        free(comp_tmp);
+    }
+    else
+    {
+        off5_structs.off5_data = malloc(section.data_start); // total_size
+        off5_structs.header = (offset5_header*)off5_structs.off5_data;
+        
+        fseek(arc_file, arc_head.offset_5, SEEK_SET);
+        fread(off5_structs.header, 0x14, 1, arc_file);
+
+        fread(off5_structs.off5_data + sizeof(offset5_header), off5_structs.header->total_size - sizeof(offset5_header), 1, arc_file);
+    }
 
     printf("\nOffset 5 Header:\n");
     printf("Total size %016llx\n", off5_structs.header->total_size);
@@ -609,7 +798,7 @@ int main(int argc, char** argv)
     printf("File Entries: %08x\n", off5_structs.header->file_entries);
     printf("Something 2: %08x\n", off5_structs.header->hash_entries);
     
-    off5_structs.folderhash_to_foldertree = (entry_pair*)off5_data;
+    off5_structs.folderhash_to_foldertree = (entry_pair*)&off5_structs.header[1];
     off5_structs.folder_tree = (folder_tree_entry*)&off5_structs.folderhash_to_foldertree[off5_structs.header->folder_entries];
     off5_structs.entries_13 = (entry_pair*)&off5_structs.folder_tree[off5_structs.header->folder_entries];
     off5_structs.numbers = (uint32_t*)&off5_structs.entries_13[off5_structs.header->hash_entries];
@@ -657,8 +846,8 @@ int main(int argc, char** argv)
 #endif
     }
 
-    free(off5_data);
-    free(off4_data);
+    free(off5_structs.off5_data);
+    free(off4_structs.off4_data);
     
     ZSTD_freeDStream(dstream);
     fclose(arc_file);
