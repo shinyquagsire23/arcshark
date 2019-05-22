@@ -16,6 +16,7 @@ enum ArcVersion
     ARC_100,
     ARC_110,
     ARC_200,
+    ARC_300,
 };
 
 enum FileChunkType
@@ -100,6 +101,18 @@ typedef struct offset4_header_200
     uint8_t unk3A;
     uint8_t unk3B;
 } offset4_header_200;
+
+typedef struct offset4_headerext_300
+{
+    uint16_t unk0;
+    uint16_t unk2;
+    uint32_t unk4;
+    uint32_t unk8;
+    uint32_t unkC;
+    uint32_t unk10;
+    uint32_t unk14;
+    uint32_t unk18;
+} offset4_headerext_300;
 
 typedef struct offset4_ext_header
 {
@@ -234,6 +247,7 @@ typedef struct offset4_structs
     void* off4_data;
     offset4_header* header;
     offset4_header_200* header_200;
+    offset4_headerext_300* headerext_300;
     offset4_ext_header* ext_header;
     entry_triplet* bulkfile_category_info;
     entry_pair* bulkfile_hash_lookup;
@@ -311,7 +325,7 @@ typedef struct arc_section
 #define SUBOFFSET_COMPRESSED_LZ4    (CURSED_SUBOFFSETS ? SUBOFFSET_100_COMPRESSED_LZ4 : SUBOFFSET_200_COMPRESSED_LZ4)
 #define SUBOFFSET_COMPRESSED_ZSTD   (CURSED_SUBOFFSETS ? SUBOFFSET_100_COMPRESSED_ZSTD : SUBOFFSET_200_COMPRESSED_ZSTD)
 
-#define VERBOSE_PRINT
+//#define VERBOSE_PRINT
 
 FILE* arc_file;
 arc_header arc_head;
@@ -1122,6 +1136,11 @@ int main(int argc, char** argv)
     
     char* fname = argv[1];
     arc_file = fopen(argv[1], "rb");
+    if (!arc_file)
+    {
+        printf("Failed to to open file `%x'! Exiting...\n", argv[1]);
+        return -1;
+    }
     
     fread(&arc_head, sizeof(arc_header), 1, arc_file);
     
@@ -1164,11 +1183,26 @@ int main(int argc, char** argv)
             off4_structs.header_200 = (offset4_header_200*)off4_structs.off4_data;
             off4_structs.header = nullptr;
             off4_structs.ext_header = (offset4_ext_header*)(off4_structs.off4_data + sizeof(offset4_header_200) + off4_structs.header_200->size_3_entries * sizeof(entry_triplet));
+            
+            off4_structs.headerext_300 = (offset4_headerext_300*)(off4_structs.off4_data + sizeof(offset4_header_200));
+            
+            // 3.0.0
+            printf("%x\n", off4_structs.ext_header->bgm_unk_movie_entries);
+            if (off4_structs.headerext_300->unk0 != 1)
+            {
+                off4_structs.headerext_300 = nullptr;
+            }
+            else
+            {
+                arc_version = ARC_300;
+                
+                off4_structs.ext_header = (offset4_ext_header*)(off4_structs.off4_data + sizeof(offset4_header_200)  + sizeof(offset4_headerext_300) + off4_structs.header_200->size_3_entries * sizeof(entry_triplet));
+            }
         }
         
-        //FILE* dump = fopen("dump.bin", "wb");
-        //fwrite(off4_structs.off4_data, 1, section.decomp_size, dump);
-        //fclose(dump);
+        FILE* dump = fopen("dump.bin", "wb");
+        fwrite(off4_structs.off4_data, 1, section.decomp_size, dump);
+        fclose(dump);
     }
     else
     {
@@ -1205,7 +1239,7 @@ int main(int argc, char** argv)
     }
     else
     {
-        printf("Offset 4 Header (2.0.0):\n");
+        printf("Offset 4 Header (2.0.0+):\n");
         printf("Total size: %08x\n", off4_structs.header_200->total_size);
         printf("File lookup entries: %08x\n", off4_structs.header_200->file_lookup_entries);
         printf("Unk08: %08x\n", off4_structs.header_200->unk08);
@@ -1229,9 +1263,22 @@ int main(int argc, char** argv)
         printf("Unk3A: %02x\n", off4_structs.header_200->unk3A);
         printf("Unk3B: %02x\n\n", off4_structs.header_200->unk3B);
         
+        if (arc_version == ARC_300)
+        {
+            printf("Offset 4 Headerext (3.0.0):\n");
+            printf("Unk0: %04x\n", off4_structs.headerext_300->unk0);
+            printf("Unk2: %04x\n", off4_structs.headerext_300->unk2);
+            printf("Unk4: %08x\n", off4_structs.headerext_300->unk4);
+            printf("Unk8: %08x\n", off4_structs.headerext_300->unk8);
+            printf("UnkC: %08x\n", off4_structs.headerext_300->unkC);
+            printf("Unk10: %08x\n", off4_structs.headerext_300->unk10);
+            printf("Unk14: %08x\n", off4_structs.headerext_300->unk14);
+            printf("Unk18: %08x\n\n", off4_structs.headerext_300->unk18);
+        }
+        
         calc_offset4_structs_200(&off4_structs);
     }
-    
+
     printf("Offset 4 Extended Header:\n");
     printf("Hash table 1 entries: %08x\n", off4_structs.ext_header->bgm_unk_movie_entries);
     printf("Hash table 2/3 entries: %08x\n", off4_structs.ext_header->entries);
