@@ -88,7 +88,7 @@ typedef struct offset4_header_200
     uint32_t unk18;
     uint32_t unk1C;
     
-    uint32_t unk20;
+    uint32_t suboffset_entries;
     uint32_t entries_bigfiles_2;
     uint32_t post_suboffset_entries;
     uint32_t unk2C;
@@ -429,7 +429,7 @@ void print_big_file(big_file_entry* entry)
     if (!entry->comp_size || entry->unk3 != 0xffffff) return;
 
     printf("%016llx decomp %08x comp %08x suboffset_index %08x files %08x unk3 %08x\n", entry->offset, entry->decomp_size, entry->comp_size, entry->suboffset_index, entry->files, entry->unk3);
-    
+#if 0
     uint64_t calc_comp = 0;
     uint64_t calc_decomp = 0;
     for (int i = 0; i < entry->files; i++)
@@ -463,6 +463,7 @@ void print_big_file(big_file_entry* entry)
     }
     
     printf("%llx %llx\n", calc_comp, calc_decomp);
+#endif
 }
 
 void print_suboffset(file_entry* entry)
@@ -974,7 +975,6 @@ void print_100_110()
 
 void print_200()
 {
-    return;
 #if 0
     printf("Category hash to bulkfile count and idx:\n");
     for (int i = 0; i < off4_structs.ext_header->bgm_unk_movie_entries; i++)
@@ -1033,8 +1033,8 @@ void print_200()
 #ifdef VERBOSE_PRINT
     for (int i = 0; i < off4_structs.header_200->entries_bigfiles_1 + off4_structs.header_200->entries_bigfiles_2; i++)
     {
-        //printf("%06x: ", i);
-        //print_big_file(&off4_structs.big_files[i]);
+        printf("%06x: ", i);
+        print_big_file(&off4_structs.big_files[i]);
     }
 #endif
     
@@ -1086,26 +1086,32 @@ void print_200()
     printf("Tree path meta to folder and indexing helper:\n");
     for (int i = 0; i < off4_structs.header_200->unk08; i++)
     {
+#ifdef VERBOSE_PRINT
         printf("%06x: ", i);
         printf("folder idx: %08x indexing idx: %08x\n", off4_structs.folder_and_indexing_from_tree[i].folder_idx, off4_structs.folder_and_indexing_from_tree[i].indexing_idx);
+#endif
     }
     
     printf("Indexing helper:\n");
     for (int i = 0; i < off4_structs.header_200->unk18 + off4_structs.header_200->post_suboffset_entries; i++)
     {
+#ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        printf("tree entry idx %08x big folder idx %08x file offset helper idx %08x flags %08x\n", off4_structs.indexing_helper[i].tree_entry_idx, off4_structs.indexing_helper[i].big_folder_idx, off4_structs.indexing_helper[i].file_offset_helper_idx, off4_structs.indexing_helper[i].flags);
+        printf("tree_entry_idx %08x big_folder_idx %08x file_offset_helper_idx %08x flags %08x\n", off4_structs.indexing_helper[i].tree_entry_idx, off4_structs.indexing_helper[i].big_folder_idx, off4_structs.indexing_helper[i].file_offset_helper_idx, off4_structs.indexing_helper[i].flags);
+#endif
     }
     
     printf("File offset helper:\n");
     for (int i = 0; i < off4_structs.header_200->unk1C + off4_structs.header_200->post_suboffset_entries; i++)
     {
+#ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        printf("%08x %08x %08x\n", off4_structs.file_offset_helper[i].bigfile_idx, off4_structs.file_offset_helper[i].suboffset_idx, off4_structs.file_offset_helper[i].flags);
+        printf("bigfile_idx %08x suboffset_idx %08x flags %08x\n", off4_structs.file_offset_helper[i].bigfile_idx, off4_structs.file_offset_helper[i].suboffset_idx, off4_structs.file_offset_helper[i].flags);
+#endif
     }
 
     printf("Suboffset table:\n");
-    for (int i = 0; i < off4_structs.header_200->unk08; i++)
+    for (int i = 0; i < off4_structs.header_200->suboffset_entries + off4_structs.header_200->post_suboffset_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
@@ -1187,7 +1193,6 @@ int main(int argc, char** argv)
             off4_structs.headerext_300 = (offset4_headerext_300*)(off4_structs.off4_data + sizeof(offset4_header_200));
             
             // 3.0.0
-            printf("%x\n", off4_structs.ext_header->bgm_unk_movie_entries);
             if (off4_structs.headerext_300->unk0 != 1)
             {
                 off4_structs.headerext_300 = nullptr;
@@ -1247,10 +1252,10 @@ int main(int argc, char** argv)
         
         printf("Big files 1: %08x\n", off4_structs.header_200->entries_bigfiles_1);
         printf("Folder hash entries: %08x\n", off4_structs.header_200->folder_hash_entries);
-        printf("Suboffset entries: %08x\n", off4_structs.header_200->unk18);
+        printf("Unk18: %08x\n", off4_structs.header_200->unk18);
         printf("Unk1C: %08x\n", off4_structs.header_200->unk1C);
         
-        printf("Unk20: %08x\n", off4_structs.header_200->unk20);
+        printf("Suboffset entries: %08x\n", off4_structs.header_200->suboffset_entries);
         printf("Big files 2: %08x\n", off4_structs.header_200->entries_bigfiles_2);
         printf("Post-suboffset entries: %08x\n", off4_structs.header_200->post_suboffset_entries);
         printf("Unk2C: %08x\n", off4_structs.header_200->unk2C);
