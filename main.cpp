@@ -11,6 +11,10 @@
 #define ZSTD_STATIC_LINKING_ONLY
 #include <zstd.h>
 
+/********************************
+* arcshark Structs/Definitions  *
+*********************************/
+
 enum ArcVersion
 {
     ARC_100,
@@ -34,39 +38,61 @@ struct FileChunk
 
 std::map<uint64_t, FileChunk> chunks;
 
-typedef struct arc_header
-{
-    uint64_t magic;
-    uint64_t offset_1;
-    uint64_t offset_2;
-    uint64_t offset_3;
-    uint64_t offset_4;
-    uint64_t offset_5;
-    uint64_t offset_6;
-} arc_header;
+/*******************************
+* Offset4 Structs/Definitions  *
+*******************************/
 
-typedef struct offset5_header
-{
-    uint64_t total_size;
-    uint32_t folder_entries;
-    uint32_t file_entries;
-    uint32_t hash_entries;
-} offset5_header;
+#define TREE_ALIGN_MASK           0x0fffe0
+#define TREE_ALIGN_LSHIFT         (5)
+#define TREE_FILESLICE_MASK       0x000003
+#define TREE_FILESLICE_IDX        0x000000
+#define TREE_FILESLICE_EXT_ADD1   0x000001
+#define TREE_FILESLICE_EXT_ADD2   0x000002
+#define TREE_REDIR                0x200000
+#define TREE_UNK                  0x100000
+
+#define FILESLICE_TREE_IDX_MASK     0x00FFFFFF
+#define FILESLICE_REDIR             0x40000000
+#define FILESLICE_UNK_BIT29         0x20000000
+#define FILESLICE_UNK_BIT27         0x08000000
+#define FILESLICE_UNK_BIT26         0x04000000
+
+#define CURSED_FILESLICES (arc_version == ARC_100 || arc_version == ARC_110)
+
+#define FILESLICE_100_COMPRESSION       0x07000000
+#define FILESLICE_100_DECOMPRESSED      0x00000000
+#define FILESLICE_100_UND               0x01000000
+#define FILESLICE_100_COMPRESSED_LZ4    0x02000000
+#define FILESLICE_100_COMPRESSED_ZSTD   0x03000000
+
+#define FILESLICE_200_COMPRESSION       0x00000007
+#define FILESLICE_200_DECOMPRESSED      0x00000000
+#define FILESLICE_200_UND               0x00000001
+#define FILESLICE_200_COMPRESSED_LZ4    0x00000002
+#define FILESLICE_200_COMPRESSED_ZSTD   0x00000003
+
+#define FILESLICE_COMPRESSION       (CURSED_FILESLICES ? FILESLICE_100_COMPRESSION : FILESLICE_200_COMPRESSION)
+#define FILESLICE_DECOMPRESSED      (CURSED_FILESLICES ? FILESLICE_100_DECOMPRESSED : FILESLICE_200_DECOMPRESSED)
+#define FILESLICE_UND               (CURSED_FILESLICES ? FILESLICE_100_UND : FILESLICE_200_UND)
+#define FILESLICE_COMPRESSED_LZ4    (CURSED_FILESLICES ? FILESLICE_100_COMPRESSED_LZ4 : FILESLICE_200_COMPRESSED_LZ4)
+#define FILESLICE_COMPRESSED_ZSTD   (CURSED_FILESLICES ? FILESLICE_100_COMPRESSED_ZSTD : FILESLICE_200_COMPRESSED_ZSTD)
+
+//#define VERBOSE_PRINT
 
 typedef struct offset4_header
 {
     uint32_t total_size;
-    uint32_t entries_big;
-    uint32_t entries_bigfiles_1;
-    uint32_t tree_entries;
+    uint32_t folder_tree_entries;
+    uint32_t entries_folderchunks_1;
+    uint32_t file_tree_entries;
     
-    uint32_t suboffset_entries;
+    uint32_t fileslice_entries;
     uint32_t file_lookup_entries;
     uint32_t folder_hash_entries;
-    uint32_t tree_entries_2;
+    uint32_t file_tree_entries_2;
     
-    uint32_t entries_bigfiles_2;
-    uint32_t post_suboffset_entries;
+    uint32_t entries_folderchunks_2;
+    uint32_t post_fileslice_entries;
     uint32_t alloc_alignment;
     uint32_t unk10;
     
@@ -81,16 +107,16 @@ typedef struct offset4_header_200
     uint32_t total_size;
     uint32_t file_lookup_entries;
     uint32_t unk08;
-    uint32_t entries_big;
+    uint32_t folder_tree_entries;
     
-    uint32_t entries_bigfiles_1;
+    uint32_t entries_folderchunks_1;
     uint32_t folder_hash_entries;
     uint32_t unk18;
     uint32_t unk1C;
     
-    uint32_t suboffset_entries;
-    uint32_t entries_bigfiles_2;
-    uint32_t post_suboffset_entries;
+    uint32_t fileslice_entries;
+    uint32_t entries_folderchunks_2;
+    uint32_t post_fileslice_entries;
     uint32_t unk2C;
     
     uint32_t alloc_alignment;
@@ -141,7 +167,7 @@ typedef struct file_pair
     uint64_t offset;
 } file_pair;
 
-typedef struct big_hash_entry
+typedef struct folder_tree_entry
 {
     entry_pair path;
     entry_pair folder;
@@ -149,71 +175,54 @@ typedef struct big_hash_entry
     entry_pair hash4;
     union
     {
-        uint32_t suboffset_start;
+        uint32_t fileslice_start;
         uint32_t indexing_start;
     };
     uint32_t num_files;
-    uint32_t folderlookup_start;
+    uint32_t subfolderlookup_start_idx;
     uint16_t num_folders;
     uint16_t tree_start;
     uint8_t unk6;
     uint8_t unk7;
     uint8_t unk8;
     uint8_t unk9;
-} big_hash_entry;
+} folder_tree_entry;
 
-typedef struct big_file_entry
+typedef struct folder_chunk_entry
 {
     uint64_t offset;
-    uint32_t decomp_size;
-    uint32_t comp_size;
-    uint32_t suboffset_index;
+    uint32_t memory_size;
+    uint32_t file_size;
+    uint32_t fileslice_index;
     uint32_t files;
     uint32_t unk3;
-} __attribute__((packed)) big_file_entry;
+} __attribute__((packed)) folder_chunk_entry;
 
-typedef struct file_entry
+typedef struct file_slice
 {
     uint32_t offset;
     uint32_t comp_size;
     uint32_t decomp_size;
     uint32_t flags;
-} file_entry;
+} file_slice;
 
-typedef struct tree_entry
+typedef struct file_tree_entry
 {
     entry_pair path;
     entry_pair ext;
     entry_pair folder;
     entry_pair file;
-    uint32_t suboffset_index;
+    uint32_t fileslice_index;
     uint32_t flags;
-} tree_entry;
+} file_tree_entry;
 
-typedef struct tree_entry_200
+typedef struct file_tree_entry_200
 {
     entry_pair path;
     entry_pair ext;
     entry_pair folder;
     entry_pair file;
-} tree_entry_200;
-
-typedef struct folder_tree_entry
-{
-    entry_pair path;
-    entry_pair parent;
-    entry_pair folder;
-    uint32_t idx1;
-    uint32_t idx2;
-} folder_tree_entry;
-
-typedef struct mini_tree_entry
-{
-    entry_pair path;
-    entry_pair folder;
-    entry_pair file;
-    entry_pair ext;
-} mini_tree_entry;
+} file_tree_entry_200;
 
 typedef struct hash_bucket
 {
@@ -223,16 +232,16 @@ typedef struct hash_bucket
 
 typedef struct indexing_helper_struct
 {
-    uint32_t tree_entry_idx;
-    uint32_t big_folder_idx;
+    uint32_t file_tree_entry_idx;
+    uint32_t folder_tree_entry_idx;
     uint32_t file_offset_helper_idx;
     uint32_t flags;
 } indexing_helper_struct;
 
 typedef struct file_offset_helper_struct
 {
-    uint32_t bigfile_idx;
-    uint32_t suboffset_idx;
+    uint32_t folderchunk_idx;
+    uint32_t fileslice_idx;
     uint32_t flags;
 } file_offset_helper_struct;
 
@@ -255,32 +264,76 @@ typedef struct offset4_structs
     uint32_t* bulkfile_lookup_to_fileidx;
     file_pair* file_pairs;
     entry_triplet* weird_hashes;
-    big_hash_entry* big_hashes;
-    big_file_entry* big_files;
+    folder_tree_entry* folder_tree_entries;
+    folder_chunk_entry* folder_chunks;
     entry_pair* folder_hash_lookup;
-    tree_entry* tree_entries;
-    file_entry* suboffset_entries;
-    entry_pair* folder_to_big_hash;
+    file_tree_entry* file_tree_entries;
+    file_slice* fileslice_entries;
+    entry_pair* folder_to_folder_tree;
     hash_bucket* file_lookup_buckets;
     entry_pair* file_lookup;
     entry_pair* numbers3;
     
-    tree_entry_200* tree_entries_200;
+    file_tree_entry_200* file_tree_entries_200;
     indexing_helper_struct* indexing_helper;
     file_offset_helper_struct* file_offset_helper;
     folder_and_indexing* folder_and_indexing_from_tree;
 } offset4_structs;
+
+/*******************
+* Offset5 Structs  *
+********************/
+
+typedef struct offset5_header
+{
+    uint64_t total_size;
+    uint32_t folder_entries;
+    uint32_t file_entries;
+    uint32_t hash_entries;
+} offset5_header;
+
+typedef struct mini_folder_tree_entry
+{
+    entry_pair path;
+    entry_pair parent;
+    entry_pair folder;
+    uint32_t idx1;
+    uint32_t idx2;
+} mini_folder_tree_entry;
+
+typedef struct mini_file_tree_entry
+{
+    entry_pair path;
+    entry_pair folder;
+    entry_pair file;
+    entry_pair ext;
+} mini_file_tree_entry;
 
 typedef struct offset5_structs
 {
     void* off5_data;
     offset5_header* header;
     entry_pair* folderhash_to_foldertree;
-    folder_tree_entry* folder_tree;
+    mini_folder_tree_entry* folder_tree;
     entry_pair* entries_13;
     uint32_t* numbers;
-    mini_tree_entry* tree_entries;
+    mini_file_tree_entry* file_tree_entries;
 } offset5_structs;
+
+/**********************
+* ARC header structs  *
+**********************/
+
+typedef struct arc_header
+{
+    uint64_t magic;
+    uint64_t offset_1;
+    uint64_t offset_2;
+    uint64_t offset_3;
+    uint64_t offset_4;
+    uint64_t offset_5;
+    uint64_t offset_6;
+} arc_header;
 
 typedef struct arc_section
 {
@@ -290,43 +343,9 @@ typedef struct arc_section
     uint32_t zstd_comp_size;
 } arc_section;
 
-#define TREE_ALIGN_MASK           0x0fffe0
-#define TREE_ALIGN_LSHIFT         (5)
-#define TREE_SUBOFFSET_MASK       0x000003
-#define TREE_SUBOFFSET_IDX        0x000000
-#define TREE_SUBOFFSET_EXT_ADD1   0x000001
-#define TREE_SUBOFFSET_EXT_ADD2   0x000002
-#define TREE_REDIR                0x200000
-#define TREE_UNK                  0x100000
-
-#define SUBOFFSET_TREE_IDX_MASK     0x00FFFFFF
-#define SUBOFFSET_REDIR             0x40000000
-#define SUBOFFSET_UNK_BIT29         0x20000000
-#define SUBOFFSET_UNK_BIT27         0x08000000
-#define SUBOFFSET_UNK_BIT26         0x04000000
-
-#define CURSED_SUBOFFSETS (arc_version == ARC_100 || arc_version == ARC_110)
-
-#define SUBOFFSET_100_COMPRESSION       0x07000000
-#define SUBOFFSET_100_DECOMPRESSED      0x00000000
-#define SUBOFFSET_100_UND               0x01000000
-#define SUBOFFSET_100_COMPRESSED_LZ4    0x02000000
-#define SUBOFFSET_100_COMPRESSED_ZSTD   0x03000000
-
-#define SUBOFFSET_200_COMPRESSION       0x00000007
-#define SUBOFFSET_200_DECOMPRESSED      0x00000000
-#define SUBOFFSET_200_UND               0x00000001
-#define SUBOFFSET_200_COMPRESSED_LZ4    0x00000002
-#define SUBOFFSET_200_COMPRESSED_ZSTD   0x00000003
-
-#define SUBOFFSET_COMPRESSION       (CURSED_SUBOFFSETS ? SUBOFFSET_100_COMPRESSION : SUBOFFSET_200_COMPRESSION)
-#define SUBOFFSET_DECOMPRESSED      (CURSED_SUBOFFSETS ? SUBOFFSET_100_DECOMPRESSED : SUBOFFSET_200_DECOMPRESSED)
-#define SUBOFFSET_UND               (CURSED_SUBOFFSETS ? SUBOFFSET_100_UND : SUBOFFSET_200_UND)
-#define SUBOFFSET_COMPRESSED_LZ4    (CURSED_SUBOFFSETS ? SUBOFFSET_100_COMPRESSED_LZ4 : SUBOFFSET_200_COMPRESSED_LZ4)
-#define SUBOFFSET_COMPRESSED_ZSTD   (CURSED_SUBOFFSETS ? SUBOFFSET_100_COMPRESSED_ZSTD : SUBOFFSET_200_COMPRESSED_ZSTD)
-
-//#define VERBOSE_PRINT
-
+/***********
+* Globals  *
+************/
 FILE* arc_file;
 arc_header arc_head;
 offset4_structs off4_structs;
@@ -334,6 +353,9 @@ offset5_structs off5_structs;
 ZSTD_DStream* dstream;
 int arc_version = ARC_100;
 
+/*********************
+* Hash40/ZSTD utils  *
+**********************/
 std::map<uint32_t, std::string> unhash;
 
 uint64_t hash40(const void* data, size_t len)
@@ -351,153 +373,26 @@ int hash40_compar(const void* a, const void* b)
     else return 1;
 }
 
-void print_entry_pair(entry_pair* pair)
+void hash40_store_init()
 {
-    printf("%010llx %06llx (%s)\n", pair->hash, pair->meta, unhash[pair->hash].c_str());
-}
-
-void print_entry_triplet(entry_triplet* triplet)
-{
-    printf("%010llx %06llx %08x (%s)\n", triplet->hash, triplet->meta, triplet->meta2, unhash[triplet->hash].c_str());
-}
-
-void print_tree_entry(tree_entry* entry)
-{
-    printf("%06x: ", entry - off4_structs.tree_entries);
-    print_entry_pair(&entry->path);
-    printf("        ");
-    print_entry_pair(&entry->ext);
-    printf("        ");
-    print_entry_pair(&entry->folder);
-    printf("        ");
-    print_entry_pair(&entry->file);
-    printf("        suboffset index %08x flags %08x\n", entry->suboffset_index, entry->flags);
-}
-
-void print_tree_entry_200(tree_entry_200* entry)
-{
-    printf("%06x: ", entry - off4_structs.tree_entries_200);
-    print_entry_pair(&entry->path);
-    printf("        ");
-    print_entry_pair(&entry->ext);
-    printf("        ");
-    print_entry_pair(&entry->folder);
-    printf("        ");
-    print_entry_pair(&entry->file);
-}
-
-void print_folder_tree_entry(folder_tree_entry* entry)
-{
-    printf("%06x: ", entry - off5_structs.folder_tree);
-    print_entry_pair(&entry->path);
-    printf("        ");
-    print_entry_pair(&entry->parent);
-    printf("        ");
-    print_entry_pair(&entry->folder);
-    printf("        ");
-    print_entry_pair(&entry->folder);
-    printf("        %08x %08x\n", entry->idx1, entry->idx2);
-}
-
-void print_mini_tree_entry(mini_tree_entry* entry)
-{
-    printf("%06x: ", entry - off5_structs.tree_entries);
-    print_entry_pair(&entry->path);
-    printf("        ");
-    print_entry_pair(&entry->folder);
-    printf("        ");
-    print_entry_pair(&entry->file);
-    printf("        ");
-    print_entry_pair(&entry->ext);
-}
-
-void print_big_hash(big_hash_entry* entry)
-{
-    printf("path %010llx %06llx, ", entry->path.hash, entry->path.meta);
-    printf("folder %010llx %06llx, ", entry->folder.hash, entry->folder.meta);
-    printf("parent %010llx %06llx, ", entry->parent.hash, entry->parent.meta);
-    printf("hash4 %010llx %06llx, ", entry->hash4.hash, entry->hash4.meta);
-    if (arc_version == ARC_100 || arc_version == ARC_110)
-        printf("suboffset ");
-    else
-        printf("indexing idx ");
-    printf("%08x files %08x folderlookup_start %08x folders %04x tree_start %04x %02x %02x %02x %02x (path %s, folder %s, parent %s, %s)\n", entry->suboffset_start, entry->num_files, entry->folderlookup_start, entry->num_folders, entry->tree_start, entry->unk6, entry->unk7, entry->unk8, entry->unk9, unhash[entry->path.hash].c_str(), unhash[entry->folder.hash].c_str(), unhash[entry->parent.hash].c_str(), unhash[entry->hash4.hash].c_str());
-}
-
-void print_big_file(big_file_entry* entry)
-{
-    if (!entry->comp_size || entry->unk3 != 0xffffff) return;
-
-    printf("%016llx decomp %08x comp %08x suboffset_index %08x files %08x unk3 %08x\n", entry->offset, entry->decomp_size, entry->comp_size, entry->suboffset_index, entry->files, entry->unk3);
-#if 0
-    uint64_t calc_comp = 0;
-    uint64_t calc_decomp = 0;
-    for (int i = 0; i < entry->files; i++)
+    std::ifstream strings("hashstrings.txt");
+    std::string line;
+    while (std::getline(strings, line))
     {
-        int suboffset_index = entry->suboffset_index+i;
-        file_entry* suboffset = &off4_structs.suboffset_entries[suboffset_index];
-        
-        if (suboffset->flags & SUBOFFSET_REDIR)
-        {
-            suboffset_index += (suboffset->flags & SUBOFFSET_TREE_IDX_MASK);
-            suboffset = &off4_structs.suboffset_entries[suboffset_index];
-        }
-        
-        uint64_t comp = suboffset->comp_size;
-        uint64_t decomp = suboffset->decomp_size;
-        uint64_t comp_aligned = (comp + 0xf) & ~0xf;
-        uint64_t decomp_aligned = ((decomp + 0x80) + 0xf) & ~0xf;
-
-        printf("    %x: %llx %llx %llx %x %llx\n", suboffset_index, suboffset->offset * 4, decomp, comp, suboffset->flags, comp_aligned);
-        
-        if (suboffset->flags & SUBOFFSET_COMPRESSION)
-        {
-            calc_decomp += decomp_aligned;
-            calc_comp += comp_aligned;
-        }
-        else
-        {
-            calc_decomp += decomp_aligned;
-            calc_comp += comp_aligned;
-        }
+        uint64_t crc = hash40((const void*)line.c_str(), strlen(line.c_str()));
+        unhash[crc] = line;
     }
-    
-    printf("%llx %llx\n", calc_comp, calc_decomp);
-#endif
 }
 
-void print_suboffset(file_entry* entry)
+void zstd_init()
 {
-    printf("%08x %08x %08x %08x\n", entry->offset, entry->comp_size, entry->decomp_size, entry->flags);
+    dstream = ZSTD_createDStream();
+    size_t const initResult = ZSTD_initDStream(dstream);
 }
 
-tree_entry* hash_lookup(uint64_t hash)
+void zstd_deinit()
 {
-    hash_bucket bucket = off4_structs.file_lookup_buckets[(hash % off4_structs.file_lookup_buckets->num_entries) + 1];
-    entry_pair* found = (entry_pair*)bsearch(&hash, &off4_structs.file_lookup[bucket.index], bucket.num_entries, sizeof(entry_pair), hash40_compar);
-    
-    return &off4_structs.tree_entries[found->meta];
-}
-
-tree_entry* file_lookup(const char* path)
-{
-    uint64_t hash = hash40(path, strlen(path));
-    return hash_lookup(hash);
-}
-
-
-tree_entry_200* hash_lookup_200(uint64_t hash)
-{
-    hash_bucket bucket = off4_structs.file_lookup_buckets[(hash % off4_structs.file_lookup_buckets->num_entries) + 1];
-    entry_pair* found = (entry_pair*)bsearch(&hash, &off4_structs.file_lookup[bucket.index], bucket.num_entries, sizeof(entry_pair), hash40_compar);
-    
-    return &off4_structs.tree_entries_200[found->meta];
-}
-
-tree_entry_200* file_lookup_200(const char* path)
-{
-    uint64_t hash = hash40(path, strlen(path));
-    return hash_lookup_200(hash);
+    ZSTD_freeDStream(dstream);
 }
 
 bool zstd_decomp(void* comp, void* decomp, uint32_t comp_size, uint32_t decomp_size)
@@ -517,323 +412,132 @@ bool zstd_decomp(void* comp, void* decomp, uint32_t comp_size, uint32_t decomp_s
     return true;
 }
 
-void dump_file(big_file_entry* bigfile, file_entry* suboffset, std::string outpath)
-{    
-    if ((suboffset->flags & SUBOFFSET_COMPRESSION) == SUBOFFSET_DECOMPRESSED)
-    {
-        FILE* part = fopen(outpath.c_str(), "wb");
-        if (!part)
-        {
-            printf("Failed to open %s\n", outpath.c_str());
-            return;
-        }
+/**************************
+* Struct print functions  *
+**************************/
 
-        void* data = malloc(suboffset->decomp_size);
+void print_entry_pair(entry_pair* pair)
+{
+    printf("%010llx %06llx (%s)\n", pair->hash, pair->meta, unhash[pair->hash].c_str());
+}
 
-        printf("decomp seek %llx\n", arc_head.offset_2 + bigfile->offset + (suboffset->offset * sizeof(uint32_t)));
-        fseek(arc_file, arc_head.offset_2 + bigfile->offset + (suboffset->offset * sizeof(uint32_t)), SEEK_SET);
-        fread(data, suboffset->comp_size, 1, arc_file);
+void print_entry_triplet(entry_triplet* triplet)
+{
+    printf("%010llx %06llx %08x (%s)\n", triplet->hash, triplet->meta, triplet->meta2, unhash[triplet->hash].c_str());
+}
 
-        fwrite(data, suboffset->decomp_size, 1, part);
-        fclose(part);
-        free(data);
+void print_file_tree_entry(file_tree_entry* entry)
+{
+    printf("%06x: ", entry - off4_structs.file_tree_entries);
+    print_entry_pair(&entry->path);
+    printf("        ");
+    print_entry_pair(&entry->ext);
+    printf("        ");
+    print_entry_pair(&entry->folder);
+    printf("        ");
+    print_entry_pair(&entry->file);
+    printf("        fileslice index %08x flags %08x\n", entry->fileslice_index, entry->flags);
+}
 
-        return;
-    }
+void print_file_tree_entry_200(file_tree_entry_200* entry)
+{
+    printf("%06x: ", entry - off4_structs.file_tree_entries_200);
+    print_entry_pair(&entry->path);
+    printf("        ");
+    print_entry_pair(&entry->ext);
+    printf("        ");
+    print_entry_pair(&entry->folder);
+    printf("        ");
+    print_entry_pair(&entry->file);
+}
 
-    if ((suboffset->flags & SUBOFFSET_COMPRESSION) != SUBOFFSET_COMPRESSED_ZSTD)
-    {
-        printf("Failed to extract %s, unknown compression (%08x)\n", outpath.c_str(), suboffset->flags & SUBOFFSET_COMPRESSION);
-        return;
-    }
+void print_mini_folder_tree_entry(mini_folder_tree_entry* entry)
+{
+    printf("%06x: ", entry - off5_structs.folder_tree);
+    print_entry_pair(&entry->path);
+    printf("        ");
+    print_entry_pair(&entry->parent);
+    printf("        ");
+    print_entry_pair(&entry->folder);
+    printf("        ");
+    print_entry_pair(&entry->folder);
+    printf("        %08x %08x\n", entry->idx1, entry->idx2);
+}
 
-    void* data = malloc(suboffset->decomp_size);
-    void* data_comp = malloc(suboffset->comp_size);
+void print_mini_file_tree_entry(mini_file_tree_entry* entry)
+{
+    printf("%06x: ", entry - off5_structs.file_tree_entries);
+    print_entry_pair(&entry->path);
+    printf("        ");
+    print_entry_pair(&entry->folder);
+    printf("        ");
+    print_entry_pair(&entry->file);
+    printf("        ");
+    print_entry_pair(&entry->ext);
+}
 
-    printf("comp seek %llx\n", arc_head.offset_2 + bigfile->offset + (suboffset->offset * sizeof(uint32_t)));
-    fseek(arc_file, arc_head.offset_2 + bigfile->offset + (suboffset->offset * sizeof(uint32_t)), SEEK_SET);
-    fread(data_comp, suboffset->comp_size, 1, arc_file);
-
-    if (!zstd_decomp(data_comp, data, suboffset->comp_size, suboffset->decomp_size))
-    {
-        printf("Failed to decompress...\n");
-        free(data);
-        free(data_comp);
-        return;
-    }
-
-    FILE* part = fopen(outpath.c_str(), "wb");
-    if (part)
-    {
-        fwrite(data, suboffset->decomp_size, 1, part);
-        fclose(part);
-    }
+void print_folder_tree_entry(folder_tree_entry* entry)
+{
+    printf("path %010llx %06llx, ", entry->path.hash, entry->path.meta);
+    printf("folder %010llx %06llx, ", entry->folder.hash, entry->folder.meta);
+    printf("parent %010llx %06llx, ", entry->parent.hash, entry->parent.meta);
+    printf("hash4 %010llx %06llx, ", entry->hash4.hash, entry->hash4.meta);
+    if (arc_version == ARC_100 || arc_version == ARC_110)
+        printf("fileslice ");
     else
-    {
-        printf("Failed to open %s\n", outpath.c_str());
-    }
-
-    free(data);
-    free(data_comp);
+        printf("indexing idx ");
+    printf("%08x files %08x subfolderlookup_start_idx %08x folders %04x tree_start %04x %02x %02x %02x %02x (path %s, folder %s, parent %s, %s)\n", entry->fileslice_start, entry->num_files, entry->subfolderlookup_start_idx, entry->num_folders, entry->tree_start, entry->unk6, entry->unk7, entry->unk8, entry->unk9, unhash[entry->path.hash].c_str(), unhash[entry->folder.hash].c_str(), unhash[entry->parent.hash].c_str(), unhash[entry->hash4.hash].c_str());
 }
 
-void dump_tree_entry(tree_entry* entry, std::string outpath)
+void print_folder_chunk(folder_chunk_entry* entry)
 {
-    if (entry->flags & TREE_REDIR)
+    //if (!entry->file_size || entry->unk3 != 0xffffff) return;
+
+    printf("%016llx memory_size %08x file_size %08x fileslice_index %08x files %08x unk3 %08x\n", entry->offset, entry->memory_size, entry->file_size, entry->fileslice_index, entry->files, entry->unk3);
+#if 0
+    uint64_t calc_comp = 0;
+    uint64_t calc_decomp = 0;
+
+    file_slice* first = &off4_structs.fileslice_entries[entry->fileslice_index];    
+    file_slice* last = &off4_structs.fileslice_entries[entry->fileslice_index+entry->files-1];
+    calc_comp = last->offset * 4 + (last->comp_size + 0xf) & ~0xf;
+    
+    for (int i = 0; i < entry->files; i++)
     {
-        uint32_t redir_idx = off4_structs.suboffset_entries[entry->suboffset_index].flags & SUBOFFSET_TREE_IDX_MASK;
+        int fileslice_index = entry->fileslice_index+i;
+        file_slice* fileslice = &off4_structs.fileslice_entries[fileslice_index];
         
-        print_tree_entry(entry);
-        entry = &off4_structs.tree_entries[redir_idx];
-        print_tree_entry(entry);
-    }
-
-    big_hash_entry* bighash = &off4_structs.big_hashes[entry->path.meta];
-    big_file_entry* bigfile = &off4_structs.big_files[bighash->path.meta];
-    print_big_hash(bighash);
-    print_big_file(bigfile);
-    
-    uint32_t suboffset_index = 0;
-    if ((entry->flags & TREE_SUBOFFSET_MASK) == TREE_SUBOFFSET_IDX)
-    {
-        suboffset_index = entry->suboffset_index;
-    }
-    else
-    {
-        suboffset_index = entry->ext.meta;
-        if (off4_structs.suboffset_entries[suboffset_index].flags & SUBOFFSET_REDIR)
-            suboffset_index += (off4_structs.suboffset_entries[suboffset_index].flags & SUBOFFSET_TREE_IDX_MASK);
-    }
-
-    dump_file(bigfile, &off4_structs.suboffset_entries[suboffset_index], outpath);
-}
-
-void dump_tree_entry_200(tree_entry_200* entry, std::string outpath)
-{
-    folder_and_indexing* pair = &off4_structs.folder_and_indexing_from_tree[entry->path.meta];
-    indexing_helper_struct* indexing = &off4_structs.indexing_helper[pair->indexing_idx];
-    file_offset_helper_struct* offset = &off4_structs.file_offset_helper[indexing->file_offset_helper_idx];
-    big_hash_entry* bighash = &off4_structs.big_hashes[pair->folder_idx];
-    big_file_entry* bigfile = &off4_structs.big_files[bighash->path.meta];
-    print_big_hash(bighash);
-    print_big_file(bigfile);
-    
-    uint32_t suboffset_index = offset->suboffset_idx;
-    print_suboffset(&off4_structs.suboffset_entries[suboffset_index]);
-    //if ((entry->flags & TREE_SUBOFFSET_MASK) == TREE_SUBOFFSET_IDX)
-    {
-        //suboffset_index = entry->suboffset_index;
-    }
-    /*else
-    {
-        suboffset_index = entry->ext.meta;
-        if (off4_structs.suboffset_entries[suboffset_index].flags & SUBOFFSET_REDIR)
-            suboffset_index += (off4_structs.suboffset_entries[suboffset_index].flags & SUBOFFSET_TREE_IDX_MASK);
-    }*/
-
-    printf("Dumping to %s\n", outpath.c_str());
-    dump_file(bigfile, &off4_structs.suboffset_entries[suboffset_index], outpath);
-}
-
-void calc_offset4_structs(offset4_structs* off4, uint32_t buckets = 0)
-{
-    off4->bulkfile_category_info = (entry_triplet*)&off4->ext_header[1];
-    off4->bulkfile_hash_lookup = (entry_pair*)&off4->bulkfile_category_info[off4->ext_header->bgm_unk_movie_entries];
-    off4->bulk_files_by_name = (entry_triplet*)&off4->bulkfile_hash_lookup[off4->ext_header->entries];
-    off4->bulkfile_lookup_to_fileidx = (uint32_t*)&off4->bulk_files_by_name[off4->ext_header->entries];
-    off4->file_pairs = (file_pair*)&off4->bulkfile_lookup_to_fileidx[off4->ext_header->entries_2];
-    off4->weird_hashes = (entry_triplet*)&off4->file_pairs[off4->ext_header->num_files];
-    off4->big_hashes = (big_hash_entry*)&off4->weird_hashes[off4->header->weird_hash_entries];
-    off4->big_files = (big_file_entry*)&off4->big_hashes[off4->header->entries_big];
-    off4->folder_hash_lookup = (entry_pair*)&off4->big_files[off4->header->entries_bigfiles_1 + off4->header->entries_bigfiles_2];
-
-    off4->tree_entries = (tree_entry*)&off4->folder_hash_lookup[off4->header->folder_hash_entries];
-    off4->suboffset_entries = (file_entry*)&off4->tree_entries[off4->header->tree_entries];
-    off4->folder_to_big_hash = (entry_pair*)&off4->suboffset_entries[off4->header->suboffset_entries + off4->header->post_suboffset_entries];
-    off4->file_lookup_buckets = (hash_bucket*)&off4->folder_to_big_hash[off4->header->entries_big];
-    
-    if (buckets == 0)
-        buckets = off4->file_lookup_buckets->num_entries;
-    
-    off4->file_lookup = (entry_pair*)&off4->file_lookup_buckets[buckets+1];
-    off4->numbers3 = (entry_pair*)&off4->file_lookup[off4->header->file_lookup_entries];
-}
-
-void calc_offset4_structs_200(offset4_structs* off4, uint32_t buckets = 0)
-{
-    off4->bulkfile_category_info = (entry_triplet*)&off4->ext_header[1];
-    off4->bulkfile_hash_lookup = (entry_pair*)&off4->bulkfile_category_info[off4->ext_header->bgm_unk_movie_entries];
-    off4->bulk_files_by_name = (entry_triplet*)&off4->bulkfile_hash_lookup[off4->ext_header->entries];
-    off4->bulkfile_lookup_to_fileidx = (uint32_t*)&off4->bulk_files_by_name[off4->ext_header->entries];
-    off4->file_pairs = (file_pair*)&off4->bulkfile_lookup_to_fileidx[off4->ext_header->entries_2];
-    off4->file_lookup_buckets = (hash_bucket*)&off4->file_pairs[off4->ext_header->num_files];
-    
-    if (buckets == 0)
-        buckets = off4->file_lookup_buckets->num_entries;
-    
-    off4->file_lookup = (entry_pair*)&off4->file_lookup_buckets[buckets+1];
-
-    off4->tree_entries = 0;
-    off4->tree_entries_200 = (tree_entry_200*)&off4->file_lookup[off4->header_200->file_lookup_entries];
-    off4->folder_and_indexing_from_tree = (folder_and_indexing*)&off4->tree_entries_200[off4->header_200->file_lookup_entries];
-
-    off4->folder_to_big_hash = (entry_pair*)&off4->folder_and_indexing_from_tree[off4->header_200->unk08];
-    off4->big_hashes = (big_hash_entry*)&off4->folder_to_big_hash[off4->header_200->entries_big];
-
-    off4->big_files = (big_file_entry*)&off4->big_hashes[off4->header_200->entries_big];
-    off4->folder_hash_lookup = (entry_pair*)&off4->big_files[off4->header_200->entries_bigfiles_1 + off4->header_200->entries_bigfiles_2];
-    off4->indexing_helper = (indexing_helper_struct*)&off4->folder_hash_lookup[off4->header_200->folder_hash_entries];
-    off4->file_offset_helper = (file_offset_helper_struct*)&off4->indexing_helper[off4->header_200->unk18 + off4->header_200->post_suboffset_entries];
-    off4->suboffset_entries = (file_entry*)&off4->file_offset_helper[off4->header_200->unk1C + off4->header_200->post_suboffset_entries];
-    
-    //printf("%x %x %x %x\n", *(uint32_t*)(indexing_helper + 0x001d97*0x10 + 0), *(uint32_t*)(indexing_helper + 0x001d97*0x10 + 4), *(uint32_t*)(indexing_helper + 0x001d97*0x10 + 8), *(uint32_t*)(indexing_helper + 0x001d97*0x10 + 0xC));
-
-    //off4->weird_hashes = (entry_triplet*)
-    //off4->numbers3 = (entry_pair*)&off4->file_lookup[off4->header->file_lookup_entries];
-}
-
-void calc_offset5_structs(offset5_structs* off5)
-{
-    off5->folderhash_to_foldertree = (entry_pair*)&off5->header[1];
-    off5->folder_tree = (folder_tree_entry*)&off5->folderhash_to_foldertree[off5->header->folder_entries];
-    off5->entries_13 = (entry_pair*)&off5->folder_tree[off5->header->folder_entries];
-    off5->numbers = (uint32_t*)&off5->entries_13[off5->header->hash_entries];
-    off5->tree_entries = (mini_tree_entry*)&off5->numbers[off5->header->file_entries];
-}
-
-void expand_subfiles_bighash_bigfile()
-{
-    offset4_structs newvals = off4_structs;
-    
-    uint32_t old_big, old_bigfiles_2, old_post;
-    old_big = newvals.header->entries_big;
-    old_bigfiles_2 = newvals.header->entries_bigfiles_2;
-    old_post = newvals.header->post_suboffset_entries;
-    
-    newvals.header->entries_big += 1;
-    newvals.header->entries_bigfiles_2 += 1;
-    newvals.header->post_suboffset_entries += 100;
-    
-    calc_offset4_structs(&newvals, off4_structs.file_lookup_buckets->num_entries);
-    
-    memmove(newvals.numbers3, off4_structs.numbers3, off4_structs.header->tree_entries * sizeof(entry_pair));
-    memmove(newvals.file_lookup, off4_structs.file_lookup, off4_structs.header->file_lookup_entries * sizeof(entry_pair));
-    memmove(newvals.file_lookup_buckets, off4_structs.file_lookup_buckets, (off4_structs.file_lookup_buckets->num_entries+1) * sizeof(hash_bucket));
-    memmove(newvals.folder_to_big_hash, off4_structs.folder_to_big_hash, off4_structs.header->entries_big * sizeof(entry_pair));
-    memmove(newvals.suboffset_entries, off4_structs.suboffset_entries, (off4_structs.header->suboffset_entries + off4_structs.header->post_suboffset_entries) * sizeof(file_entry));
-    memmove(newvals.tree_entries, off4_structs.tree_entries, off4_structs.header->tree_entries * sizeof(tree_entry));
-    memmove(newvals.folder_hash_lookup, off4_structs.folder_hash_lookup, off4_structs.header->folder_hash_entries * sizeof(entry_pair));
-    memmove(newvals.big_files, off4_structs.big_files, (off4_structs.header->entries_bigfiles_1 + off4_structs.header->entries_bigfiles_2) * sizeof(big_file_entry));
-    memmove(newvals.big_hashes, off4_structs.big_hashes, off4_structs.header->entries_big * sizeof(big_hash_entry));
-    memmove(newvals.weird_hashes, off4_structs.weird_hashes, off4_structs.header->weird_hash_entries * sizeof(entry_triplet));
-    memmove(newvals.file_pairs, off4_structs.file_pairs, off4_structs.ext_header->entries_2 * sizeof(file_pair));
-    memmove(newvals.bulkfile_lookup_to_fileidx, off4_structs.bulkfile_lookup_to_fileidx, off4_structs.ext_header->entries_2 * sizeof(uint32_t));
-    memmove(newvals.bulk_files_by_name, off4_structs.bulk_files_by_name, off4_structs.ext_header->entries * sizeof(entry_triplet));
-    memmove(newvals.bulkfile_hash_lookup, off4_structs.bulkfile_hash_lookup, off4_structs.ext_header->entries * sizeof(entry_pair));
-    memmove(newvals.bulkfile_category_info, off4_structs.bulkfile_category_info, off4_structs.ext_header->bgm_unk_movie_entries * sizeof(entry_triplet));
-    
-    off4_structs = newvals;
-    
-    tree_entry* wolf = file_lookup("prebuilt:/nro/release/lua2cpp_wolf.nro");
-    
-    
-    big_hash_entry* bighash = &off4_structs.big_hashes[wolf->path.meta];
-    big_file_entry* bigfile = &off4_structs.big_files[bighash->path.meta];
-    
-    uint32_t new_suboffset_idx = off4_structs.header->suboffset_entries + old_post;
-    big_hash_entry* bighash_new = &off4_structs.big_hashes[old_big];
-    big_file_entry* bigfile_new = &off4_structs.big_files[off4_structs.header->entries_bigfiles_1 + old_bigfiles_2];
-    file_entry* suboffset_new = &off4_structs.suboffset_entries[new_suboffset_idx];
-    
-   *bighash_new = *bighash;
-   *bigfile_new = *bigfile;
-    
-    wolf->path.meta = old_big;
-    bighash_new->path.meta = off4_structs.header->entries_bigfiles_1 + old_bigfiles_2;
-    bighash_new->suboffset_start = new_suboffset_idx;
-
-    bigfile_new->suboffset_index = new_suboffset_idx;
-
-    for (int i = 0; i < bigfile_new->files; i++)
-    {
-        off4_structs.suboffset_entries[new_suboffset_idx+i] = off4_structs.suboffset_entries[bigfile->suboffset_index+i];
-    }
-    
-    wolf->suboffset_index = (wolf->suboffset_index-bighash->suboffset_start)+new_suboffset_idx;
-
-    // weird stuff
-    
-    bigfile_new->offset = (0xffff00000000 / 4);
-    printf("%llx %llx\n", bigfile_new->decomp_size, bigfile_new->comp_size);
-    bigfile_new->decomp_size = 0;
-    bigfile_new->comp_size = 0;
-    
-    file_entry* suboffset_wolf = &off4_structs.suboffset_entries[wolf->suboffset_index];
-    /*suboffset_wolf->flags &= ~SUBOFFSET_COMPRESSION;
-    suboffset_wolf->flags |= SUBOFFSET_DECOMPRESSED;
-    suboffset_wolf->comp_size = suboffset_new->decomp_size;*/
-    
-    for (int i = 0; i < bigfile_new->files; i++)
-    {
-        int suboffset_index = new_suboffset_idx+i;
-        file_entry* suboffset = &off4_structs.suboffset_entries[suboffset_index];
-        
-        if (suboffset->flags & SUBOFFSET_REDIR)
+        if (fileslice->flags & FILESLICE_REDIR)
         {
-            suboffset_index += (suboffset->flags & SUBOFFSET_TREE_IDX_MASK);
-            suboffset = &off4_structs.suboffset_entries[suboffset_index];
+            fileslice_index += (fileslice->flags & FILESLICE_TREE_IDX_MASK);
+            fileslice = &off4_structs.fileslice_entries[fileslice_index];
         }
         
-        uint64_t comp = suboffset->comp_size;
-        uint64_t decomp = suboffset->decomp_size;
-        uint64_t comp_aligned = (comp + 0x7) & ~0x7;
-        uint64_t decomp_aligned = (decomp + 0x7f) & ~0x7f;
+        uint64_t decomp = fileslice->decomp_size;
+        uint64_t decomp_aligned_100 = (decomp + 0xff) & ~0xff;
+        uint64_t decomp_aligned_8 = (decomp + 0x7) & ~0x7;
 
-        printf("    %x: %llx %llx %llx %x %llx\n", suboffset_index, suboffset->offset * 4, decomp, comp, suboffset->flags, comp_aligned);
+        printf("    %x: %llx %llx %x\n", fileslice_index, fileslice->offset * 4, decomp, fileslice->flags);
         
-        if (suboffset->flags & SUBOFFSET_COMPRESSION)
+        if (i != entry->files-1)
         {
-            bigfile_new->decomp_size += decomp_aligned;
-            bigfile_new->comp_size += comp_aligned;
+            calc_decomp += decomp + 0x80;
         }
         else
         {
-            bigfile_new->decomp_size += comp_aligned;
-            bigfile_new->comp_size += comp_aligned;
+            calc_decomp += decomp_aligned_8;
         }
     }
     
-    printf("%llx %llx\n", bigfile_new->decomp_size, bigfile_new->comp_size);
+    calc_decomp = (calc_decomp + 0x7) & ~0x7;
     
-    print_tree_entry(wolf);
-    print_suboffset(suboffset_new);
-    print_big_hash(bighash_new);
-    print_big_file(bigfile_new);
-    print_entry_pair(&off4_structs.folder_hash_lookup[bighash_new->folderlookup_start + 1]);
+    printf("%llx %llx\n", calc_comp, calc_decomp);
+#endif
 }
 
-void dump_file(std::string filepath)
+void print_fileslice(file_slice* entry)
 {
-    if (arc_version == ARC_100 || arc_version == ARC_110)
-    {
-        tree_entry* entry = file_lookup(filepath.c_str());
-        print_tree_entry(entry);
-        dump_tree_entry(entry, unhash[entry->file.hash]);
-    }
-    else
-    {
-        tree_entry_200* entry = file_lookup_200(filepath.c_str());
-        print_tree_entry_200(entry);
-        
-        dump_tree_entry_200(entry, unhash[entry->file.hash]);
-    }
-}
-
-void dump_hash(uint64_t hash)
-{
-    tree_entry* entry = hash_lookup(hash);
-    print_tree_entry(entry);
-    dump_tree_entry(entry, "hash2.bin");
+    printf("%08x %08x %08x %08x\n", entry->offset, entry->comp_size, entry->decomp_size, entry->flags);
 }
 
 void print_100_110()
@@ -891,21 +595,21 @@ void print_100_110()
 #endif
     }
     
-    printf("Big hash table:\n");
-    for (int i = 0; i < off4_structs.header->entries_big; i++)
+    printf("Folder Tree Entries:\n");
+    for (int i = 0; i < off4_structs.header->folder_tree_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        print_big_hash(&off4_structs.big_hashes[i]);
+        print_folder_tree_entry(&off4_structs.folder_tree_entries[i]);
 #endif
     }
 
-    printf("Big file entries:\n");
+    printf("Folder chunk entries:\n");
 #ifdef VERBOSE_PRINT
-    for (int i = 0; i < off4_structs.header->entries_bigfiles_1 + off4_structs.header->entries_bigfiles_2; i++)
+    for (int i = 0; i < off4_structs.header->entries_folderchunks_1 + off4_structs.header->entries_folderchunks_2; i++)
     {
         printf("%06x: ", i);
-        print_big_file(&off4_structs.big_files[i]);
+        print_folder_chunk(&off4_structs.folder_chunks[i]);
     }
 #endif
     
@@ -918,33 +622,33 @@ void print_100_110()
 #endif
     }
     
-    printf("File Entries:\n");
-    for (int i = 0; i < off4_structs.header->tree_entries; i++)
+    printf("File Tree Entries:\n");
+    for (int i = 0; i < off4_structs.header->file_tree_entries; i++)
     {
 #ifdef VERBOSE_PRINT
-        print_tree_entry(&off4_structs.tree_entries[i]);
+        print_file_tree_entry(&off4_structs.file_tree_entries[i]);
 #endif
     }
     
-    printf("Suboffset table:\n");
-    for (int i = 0; i < off4_structs.header->suboffset_entries; i++)
+    printf("Fileslice table:\n");
+    for (int i = 0; i < off4_structs.header->fileslice_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        print_suboffset(&off4_structs.suboffset_entries[i]);
+        print_fileslice(&off4_structs.fileslice_entries[i]);
 #endif
     }
     
-    printf("Folder to big hash lookup:\n");
-    for (int i = 0; i < off4_structs.header->entries_big; i++)
+    printf("Folder to folder tree lookup:\n");
+    for (int i = 0; i < off4_structs.header->folder_tree_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        print_entry_pair(&off4_structs.folder_to_big_hash[i]);
+        print_entry_pair(&off4_structs.folder_to_folder_tree[i]);
 #endif
     }
 
-    printf("File->suboffset index lookup buckets: total hashes %08x buckets %08x\n", off4_structs.file_lookup_buckets->index, off4_structs.file_lookup_buckets->num_entries);
+    printf("File->fileslice index lookup buckets: total hashes %08x buckets %08x\n", off4_structs.file_lookup_buckets->index, off4_structs.file_lookup_buckets->num_entries);
     // off4_structs.numbers[hash % table_size].first is lookup start index
     // off4_structs.numbers[hash % table_size].second is lookup search length
     for (int i = 1; i < off4_structs.file_lookup_buckets->num_entries+1; i++)
@@ -954,7 +658,7 @@ void print_100_110()
 #endif
     }
     
-    printf("File->suboffset index lookup table:\n");
+    printf("File->fileslice index lookup table:\n");
     for (int i = 0; i < off4_structs.header->file_lookup_entries; i++)
     {
 #ifdef VERBOSE_PRINT
@@ -964,7 +668,7 @@ void print_100_110()
     }
     
     printf("Numbers 3:\n");
-    for (int i = 0; i < off4_structs.header->tree_entries; i++)
+    for (int i = 0; i < off4_structs.header->file_tree_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
@@ -1020,21 +724,21 @@ void print_200()
 #endif
     }
 #endif
-    printf("Big hash table:\n");
-    for (int i = 0; i < off4_structs.header_200->entries_big; i++)
+    printf("Folder Tree Entries:\n");
+    for (int i = 0; i < off4_structs.header_200->folder_tree_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        print_big_hash(&off4_structs.big_hashes[i]);
+        print_folder_tree_entry(&off4_structs.folder_tree_entries[i]);
 #endif
     }
 
-    printf("Big file entries:\n");
+    printf("Folder chunk entries:\n");
 #ifdef VERBOSE_PRINT
-    for (int i = 0; i < off4_structs.header_200->entries_bigfiles_1 + off4_structs.header_200->entries_bigfiles_2; i++)
+    for (int i = 0; i < off4_structs.header_200->entries_folderchunks_1 + off4_structs.header_200->entries_folderchunks_2; i++)
     {
         printf("%06x: ", i);
-        print_big_file(&off4_structs.big_files[i]);
+        print_folder_chunk(&off4_structs.folder_chunks[i]);
     }
 #endif
     
@@ -1047,24 +751,24 @@ void print_200()
 #endif
     }
     
-    printf("File Entries:\n");
+    printf("File Tree Entries:\n");
     for (int i = 0; i < off4_structs.header_200->file_lookup_entries; i++)
     {
 #ifdef VERBOSE_PRINT
-        print_tree_entry_200(&off4_structs.tree_entries_200[i]);
+        print_file_tree_entry_200(&off4_structs.file_tree_entries_200[i]);
 #endif
     }
     
-    printf("Folder to big hash lookup:\n");
-    for (int i = 0; i < off4_structs.header_200->entries_big; i++)
+    printf("Folder to folder tree lookup:\n");
+    for (int i = 0; i < off4_structs.header_200->folder_tree_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        print_entry_pair(&off4_structs.folder_to_big_hash[i]);
+        print_entry_pair(&off4_structs.folder_to_folder_tree[i]);
 #endif
     }
 
-    printf("File->suboffset index lookup buckets: total hashes %08x buckets %08x\n", off4_structs.file_lookup_buckets->index, off4_structs.file_lookup_buckets->num_entries);
+    printf("File->fileslice index lookup buckets: total hashes %08x buckets %08x\n", off4_structs.file_lookup_buckets->index, off4_structs.file_lookup_buckets->num_entries);
     // off4_structs.numbers[hash % table_size].first is lookup start index
     // off4_structs.numbers[hash % table_size].second is lookup search length
     for (int i = 1; i < off4_structs.file_lookup_buckets->num_entries+1; i++)
@@ -1074,7 +778,7 @@ void print_200()
 #endif
     }
     
-    printf("File->suboffset index lookup table:\n");
+    printf("File->fileslice index lookup table:\n");
     for (int i = 0; i < off4_structs.header_200->file_lookup_entries; i++)
     {
 #ifdef VERBOSE_PRINT
@@ -1093,31 +797,384 @@ void print_200()
     }
     
     printf("Indexing helper:\n");
-    for (int i = 0; i < off4_structs.header_200->unk18 + off4_structs.header_200->post_suboffset_entries; i++)
+    for (int i = 0; i < off4_structs.header_200->unk18 + off4_structs.header_200->post_fileslice_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        printf("tree_entry_idx %08x big_folder_idx %08x file_offset_helper_idx %08x flags %08x\n", off4_structs.indexing_helper[i].tree_entry_idx, off4_structs.indexing_helper[i].big_folder_idx, off4_structs.indexing_helper[i].file_offset_helper_idx, off4_structs.indexing_helper[i].flags);
+        printf("file_tree_entry_idx %08x folder_tree_entry_idx %08x file_offset_helper_idx %08x flags %08x\n", off4_structs.indexing_helper[i].file_tree_entry_idx, off4_structs.indexing_helper[i].folder_tree_entry_idx, off4_structs.indexing_helper[i].file_offset_helper_idx, off4_structs.indexing_helper[i].flags);
 #endif
     }
     
     printf("File offset helper:\n");
-    for (int i = 0; i < off4_structs.header_200->unk1C + off4_structs.header_200->post_suboffset_entries; i++)
+    for (int i = 0; i < off4_structs.header_200->unk1C + off4_structs.header_200->post_fileslice_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        printf("bigfile_idx %08x suboffset_idx %08x flags %08x\n", off4_structs.file_offset_helper[i].bigfile_idx, off4_structs.file_offset_helper[i].suboffset_idx, off4_structs.file_offset_helper[i].flags);
+        printf("folderchunk_idx %08x fileslice_idx %08x flags %08x\n", off4_structs.file_offset_helper[i].folderchunk_idx, off4_structs.file_offset_helper[i].fileslice_idx, off4_structs.file_offset_helper[i].flags);
 #endif
     }
 
-    printf("Suboffset table:\n");
-    for (int i = 0; i < off4_structs.header_200->suboffset_entries + off4_structs.header_200->post_suboffset_entries; i++)
+    printf("Fileslice table:\n");
+    for (int i = 0; i < off4_structs.header_200->fileslice_entries + off4_structs.header_200->post_fileslice_entries; i++)
     {
 #ifdef VERBOSE_PRINT
         printf("%06x: ", i);
-        print_suboffset(&off4_structs.suboffset_entries[i]);
+        print_fileslice(&off4_structs.fileslice_entries[i]);
 #endif
     }
+}
+
+/********************
+* Lookup functions  *
+********************/
+
+file_tree_entry* hash_lookup(uint64_t hash)
+{
+    hash_bucket bucket = off4_structs.file_lookup_buckets[(hash % off4_structs.file_lookup_buckets->num_entries) + 1];
+    entry_pair* found = (entry_pair*)bsearch(&hash, &off4_structs.file_lookup[bucket.index], bucket.num_entries, sizeof(entry_pair), hash40_compar);
+    
+    return &off4_structs.file_tree_entries[found->meta];
+}
+
+file_tree_entry* file_lookup(const char* path)
+{
+    uint64_t hash = hash40(path, strlen(path));
+    return hash_lookup(hash);
+}
+
+file_tree_entry_200* hash_lookup_200(uint64_t hash)
+{
+    hash_bucket bucket = off4_structs.file_lookup_buckets[(hash % off4_structs.file_lookup_buckets->num_entries) + 1];
+    entry_pair* found = (entry_pair*)bsearch(&hash, &off4_structs.file_lookup[bucket.index], bucket.num_entries, sizeof(entry_pair), hash40_compar);
+    
+    return &off4_structs.file_tree_entries_200[found->meta];
+}
+
+file_tree_entry_200* file_lookup_200(const char* path)
+{
+    uint64_t hash = hash40(path, strlen(path));
+    return hash_lookup_200(hash);
+}
+
+void dump_file(folder_chunk_entry* folderchunk, file_slice* fileslice, std::string outpath)
+{    
+    if ((fileslice->flags & FILESLICE_COMPRESSION) == FILESLICE_DECOMPRESSED)
+    {
+        FILE* part = fopen(outpath.c_str(), "wb");
+        if (!part)
+        {
+            printf("Failed to open %s\n", outpath.c_str());
+            return;
+        }
+
+        void* data = malloc(fileslice->decomp_size);
+
+        printf("decomp seek %llx\n", arc_head.offset_2 + folderchunk->offset + (fileslice->offset * sizeof(uint32_t)));
+        fseek(arc_file, arc_head.offset_2 + folderchunk->offset + (fileslice->offset * sizeof(uint32_t)), SEEK_SET);
+        fread(data, fileslice->comp_size, 1, arc_file);
+
+        fwrite(data, fileslice->decomp_size, 1, part);
+        fclose(part);
+        free(data);
+
+        return;
+    }
+
+    if ((fileslice->flags & FILESLICE_COMPRESSION) != FILESLICE_COMPRESSED_ZSTD)
+    {
+        printf("Failed to extract %s, unknown compression (%08x)\n", outpath.c_str(), fileslice->flags & FILESLICE_COMPRESSION);
+        return;
+    }
+
+    void* data = malloc(fileslice->decomp_size);
+    void* data_comp = malloc(fileslice->comp_size);
+
+    printf("comp seek %llx\n", arc_head.offset_2 + folderchunk->offset + (fileslice->offset * sizeof(uint32_t)));
+    fseek(arc_file, arc_head.offset_2 + folderchunk->offset + (fileslice->offset * sizeof(uint32_t)), SEEK_SET);
+    fread(data_comp, fileslice->comp_size, 1, arc_file);
+
+    if (!zstd_decomp(data_comp, data, fileslice->comp_size, fileslice->decomp_size))
+    {
+        printf("Failed to decompress...\n");
+        free(data);
+        free(data_comp);
+        return;
+    }
+
+    FILE* part = fopen(outpath.c_str(), "wb");
+    if (part)
+    {
+        fwrite(data, fileslice->decomp_size, 1, part);
+        fclose(part);
+    }
+    else
+    {
+        printf("Failed to open %s\n", outpath.c_str());
+    }
+
+    free(data);
+    free(data_comp);
+}
+
+void dump_file_tree_entry(file_tree_entry* entry, std::string outpath)
+{
+    if (entry->flags & TREE_REDIR)
+    {
+        uint32_t redir_idx = off4_structs.fileslice_entries[entry->fileslice_index].flags & FILESLICE_TREE_IDX_MASK;
+        
+        print_file_tree_entry(entry);
+        entry = &off4_structs.file_tree_entries[redir_idx];
+        print_file_tree_entry(entry);
+    }
+
+    folder_tree_entry* bighash = &off4_structs.folder_tree_entries[entry->path.meta];
+    folder_chunk_entry* folderchunk = &off4_structs.folder_chunks[bighash->path.meta];
+    print_folder_tree_entry(bighash);
+    print_folder_chunk(folderchunk);
+    
+    uint32_t fileslice_index = 0;
+    if ((entry->flags & TREE_FILESLICE_MASK) == TREE_FILESLICE_IDX)
+    {
+        fileslice_index = entry->fileslice_index;
+    }
+    else
+    {
+        fileslice_index = entry->ext.meta;
+        if (off4_structs.fileslice_entries[fileslice_index].flags & FILESLICE_REDIR)
+            fileslice_index += (off4_structs.fileslice_entries[fileslice_index].flags & FILESLICE_TREE_IDX_MASK);
+    }
+
+    dump_file(folderchunk, &off4_structs.fileslice_entries[fileslice_index], outpath);
+}
+
+void dump_file_tree_entry_200(file_tree_entry_200* entry, std::string outpath)
+{
+    folder_and_indexing* pair = &off4_structs.folder_and_indexing_from_tree[entry->path.meta];
+    indexing_helper_struct* indexing = &off4_structs.indexing_helper[pair->indexing_idx];
+    file_offset_helper_struct* offset = &off4_structs.file_offset_helper[indexing->file_offset_helper_idx];
+    
+    printf("%x\n", offset->flags);
+    
+    folder_tree_entry* bighash = &off4_structs.folder_tree_entries[pair->folder_idx];
+    folder_chunk_entry* folderchunk = &off4_structs.folder_chunks[bighash->path.meta];
+    print_folder_tree_entry(bighash);
+    print_folder_chunk(folderchunk);
+    
+    uint32_t fileslice_index = offset->fileslice_idx;
+    print_fileslice(&off4_structs.fileslice_entries[fileslice_index]);
+    //if ((entry->flags & TREE_FILESLICE_MASK) == TREE_FILESLICE_IDX)
+    {
+        //fileslice_index = entry->fileslice_index;
+    }
+    /*else
+    {
+        fileslice_index = entry->ext.meta;
+        if (off4_structs.fileslice_entries[fileslice_index].flags & FILESLICE_REDIR)
+            fileslice_index += (off4_structs.fileslice_entries[fileslice_index].flags & FILESLICE_TREE_IDX_MASK);
+    }*/
+
+    printf("Dumping to %s\n", outpath.c_str());
+    dump_file(folderchunk, &off4_structs.fileslice_entries[fileslice_index], outpath);
+}
+
+void dump_file(std::string filepath)
+{
+    if (arc_version == ARC_100 || arc_version == ARC_110)
+    {
+        file_tree_entry* entry = file_lookup(filepath.c_str());
+        print_file_tree_entry(entry);
+        dump_file_tree_entry(entry, unhash[entry->file.hash]);
+    }
+    else
+    {
+        file_tree_entry_200* entry = file_lookup_200(filepath.c_str());
+        print_file_tree_entry_200(entry);
+        
+        dump_file_tree_entry_200(entry, unhash[entry->file.hash]);
+    }
+}
+
+void dump_hash(uint64_t hash)
+{
+    file_tree_entry* entry = hash_lookup(hash);
+    print_file_tree_entry(entry);
+    dump_file_tree_entry(entry, "hash2.bin");
+}
+
+/****************************************
+* Struct offset calculations/expansion  *
+****************************************/
+
+void calc_offset4_structs(offset4_structs* off4, uint32_t buckets = 0)
+{
+    off4->bulkfile_category_info = (entry_triplet*)&off4->ext_header[1];
+    off4->bulkfile_hash_lookup = (entry_pair*)&off4->bulkfile_category_info[off4->ext_header->bgm_unk_movie_entries];
+    off4->bulk_files_by_name = (entry_triplet*)&off4->bulkfile_hash_lookup[off4->ext_header->entries];
+    off4->bulkfile_lookup_to_fileidx = (uint32_t*)&off4->bulk_files_by_name[off4->ext_header->entries];
+    off4->file_pairs = (file_pair*)&off4->bulkfile_lookup_to_fileidx[off4->ext_header->entries_2];
+    off4->weird_hashes = (entry_triplet*)&off4->file_pairs[off4->ext_header->num_files];
+    off4->folder_tree_entries = (folder_tree_entry*)&off4->weird_hashes[off4->header->weird_hash_entries];
+    off4->folder_chunks = (folder_chunk_entry*)&off4->folder_tree_entries[off4->header->folder_tree_entries];
+    off4->folder_hash_lookup = (entry_pair*)&off4->folder_chunks[off4->header->entries_folderchunks_1 + off4->header->entries_folderchunks_2];
+
+    off4->file_tree_entries = (file_tree_entry*)&off4->folder_hash_lookup[off4->header->folder_hash_entries];
+    off4->fileslice_entries = (file_slice*)&off4->file_tree_entries[off4->header->file_tree_entries];
+    off4->folder_to_folder_tree = (entry_pair*)&off4->fileslice_entries[off4->header->fileslice_entries + off4->header->post_fileslice_entries];
+    off4->file_lookup_buckets = (hash_bucket*)&off4->folder_to_folder_tree[off4->header->folder_tree_entries];
+    
+    if (buckets == 0)
+        buckets = off4->file_lookup_buckets->num_entries;
+    
+    off4->file_lookup = (entry_pair*)&off4->file_lookup_buckets[buckets+1];
+    off4->numbers3 = (entry_pair*)&off4->file_lookup[off4->header->file_lookup_entries];
+}
+
+void calc_offset4_structs_200(offset4_structs* off4, uint32_t buckets = 0)
+{
+    off4->bulkfile_category_info = (entry_triplet*)&off4->ext_header[1];
+    off4->bulkfile_hash_lookup = (entry_pair*)&off4->bulkfile_category_info[off4->ext_header->bgm_unk_movie_entries];
+    off4->bulk_files_by_name = (entry_triplet*)&off4->bulkfile_hash_lookup[off4->ext_header->entries];
+    off4->bulkfile_lookup_to_fileidx = (uint32_t*)&off4->bulk_files_by_name[off4->ext_header->entries];
+    off4->file_pairs = (file_pair*)&off4->bulkfile_lookup_to_fileidx[off4->ext_header->entries_2];
+    off4->file_lookup_buckets = (hash_bucket*)&off4->file_pairs[off4->ext_header->num_files];
+    
+    if (buckets == 0)
+        buckets = off4->file_lookup_buckets->num_entries;
+    
+    off4->file_lookup = (entry_pair*)&off4->file_lookup_buckets[buckets+1];
+
+    off4->file_tree_entries = 0;
+    off4->file_tree_entries_200 = (file_tree_entry_200*)&off4->file_lookup[off4->header_200->file_lookup_entries];
+    off4->folder_and_indexing_from_tree = (folder_and_indexing*)&off4->file_tree_entries_200[off4->header_200->file_lookup_entries];
+
+    off4->folder_to_folder_tree = (entry_pair*)&off4->folder_and_indexing_from_tree[off4->header_200->unk08];
+    off4->folder_tree_entries = (folder_tree_entry*)&off4->folder_to_folder_tree[off4->header_200->folder_tree_entries];
+
+    off4->folder_chunks = (folder_chunk_entry*)&off4->folder_tree_entries[off4->header_200->folder_tree_entries];
+    off4->folder_hash_lookup = (entry_pair*)&off4->folder_chunks[off4->header_200->entries_folderchunks_1 + off4->header_200->entries_folderchunks_2];
+    off4->indexing_helper = (indexing_helper_struct*)&off4->folder_hash_lookup[off4->header_200->folder_hash_entries];
+    off4->file_offset_helper = (file_offset_helper_struct*)&off4->indexing_helper[off4->header_200->unk18 + off4->header_200->post_fileslice_entries];
+    off4->fileslice_entries = (file_slice*)&off4->file_offset_helper[off4->header_200->unk1C + off4->header_200->post_fileslice_entries];
+}
+
+void calc_offset5_structs(offset5_structs* off5)
+{
+    off5->folderhash_to_foldertree = (entry_pair*)&off5->header[1];
+    off5->folder_tree = (mini_folder_tree_entry*)&off5->folderhash_to_foldertree[off5->header->folder_entries];
+    off5->entries_13 = (entry_pair*)&off5->folder_tree[off5->header->folder_entries];
+    off5->numbers = (uint32_t*)&off5->entries_13[off5->header->hash_entries];
+    off5->file_tree_entries = (mini_file_tree_entry*)&off5->numbers[off5->header->file_entries];
+}
+
+void expand_fileslices_foldertree_folderchunk()
+{
+    offset4_structs newvals = off4_structs;
+    
+    uint32_t old_big, old_folderchunks_2, old_post;
+    old_big = newvals.header->folder_tree_entries;
+    old_folderchunks_2 = newvals.header->entries_folderchunks_2;
+    old_post = newvals.header->post_fileslice_entries;
+    
+    newvals.header->folder_tree_entries += 1;
+    newvals.header->entries_folderchunks_2 += 1;
+    newvals.header->post_fileslice_entries += 100;
+    
+    calc_offset4_structs(&newvals, off4_structs.file_lookup_buckets->num_entries);
+    
+    memmove(newvals.numbers3, off4_structs.numbers3, off4_structs.header->file_tree_entries * sizeof(entry_pair));
+    memmove(newvals.file_lookup, off4_structs.file_lookup, off4_structs.header->file_lookup_entries * sizeof(entry_pair));
+    memmove(newvals.file_lookup_buckets, off4_structs.file_lookup_buckets, (off4_structs.file_lookup_buckets->num_entries+1) * sizeof(hash_bucket));
+    memmove(newvals.folder_to_folder_tree, off4_structs.folder_to_folder_tree, off4_structs.header->folder_tree_entries * sizeof(entry_pair));
+    memmove(newvals.fileslice_entries, off4_structs.fileslice_entries, (off4_structs.header->fileslice_entries + off4_structs.header->post_fileslice_entries) * sizeof(file_slice));
+    memmove(newvals.file_tree_entries, off4_structs.file_tree_entries, off4_structs.header->file_tree_entries * sizeof(file_tree_entry));
+    memmove(newvals.folder_hash_lookup, off4_structs.folder_hash_lookup, off4_structs.header->folder_hash_entries * sizeof(entry_pair));
+    memmove(newvals.folder_chunks, off4_structs.folder_chunks, (off4_structs.header->entries_folderchunks_1 + off4_structs.header->entries_folderchunks_2) * sizeof(folder_chunk_entry));
+    memmove(newvals.folder_tree_entries, off4_structs.folder_tree_entries, off4_structs.header->folder_tree_entries * sizeof(folder_tree_entry));
+    memmove(newvals.weird_hashes, off4_structs.weird_hashes, off4_structs.header->weird_hash_entries * sizeof(entry_triplet));
+    memmove(newvals.file_pairs, off4_structs.file_pairs, off4_structs.ext_header->entries_2 * sizeof(file_pair));
+    memmove(newvals.bulkfile_lookup_to_fileidx, off4_structs.bulkfile_lookup_to_fileidx, off4_structs.ext_header->entries_2 * sizeof(uint32_t));
+    memmove(newvals.bulk_files_by_name, off4_structs.bulk_files_by_name, off4_structs.ext_header->entries * sizeof(entry_triplet));
+    memmove(newvals.bulkfile_hash_lookup, off4_structs.bulkfile_hash_lookup, off4_structs.ext_header->entries * sizeof(entry_pair));
+    memmove(newvals.bulkfile_category_info, off4_structs.bulkfile_category_info, off4_structs.ext_header->bgm_unk_movie_entries * sizeof(entry_triplet));
+    
+    off4_structs = newvals;
+    
+    file_tree_entry* wolf = file_lookup("prebuilt:/nro/release/lua2cpp_wolf.nro");
+    
+    
+    folder_tree_entry* bighash = &off4_structs.folder_tree_entries[wolf->path.meta];
+    folder_chunk_entry* folderchunk = &off4_structs.folder_chunks[bighash->path.meta];
+    
+    uint32_t new_fileslice_idx = off4_structs.header->fileslice_entries + old_post;
+    folder_tree_entry* bighash_new = &off4_structs.folder_tree_entries[old_big];
+    folder_chunk_entry* folderchunk_new = &off4_structs.folder_chunks[off4_structs.header->entries_folderchunks_1 + old_folderchunks_2];
+    file_slice* fileslice_new = &off4_structs.fileslice_entries[new_fileslice_idx];
+    
+   *bighash_new = *bighash;
+   *folderchunk_new = *folderchunk;
+    
+    wolf->path.meta = old_big;
+    bighash_new->path.meta = off4_structs.header->entries_folderchunks_1 + old_folderchunks_2;
+    bighash_new->fileslice_start = new_fileslice_idx;
+
+    folderchunk_new->fileslice_index = new_fileslice_idx;
+
+    for (int i = 0; i < folderchunk_new->files; i++)
+    {
+        off4_structs.fileslice_entries[new_fileslice_idx+i] = off4_structs.fileslice_entries[folderchunk->fileslice_index+i];
+    }
+    
+    wolf->fileslice_index = (wolf->fileslice_index-bighash->fileslice_start)+new_fileslice_idx;
+
+    // weird stuff
+    
+    folderchunk_new->offset = (0xffff00000000 / 4);
+    printf("%llx %llx\n", folderchunk_new->memory_size, folderchunk_new->file_size);
+    folderchunk_new->memory_size = 0;
+    folderchunk_new->file_size = 0;
+    
+    file_slice* fileslice_wolf = &off4_structs.fileslice_entries[wolf->fileslice_index];
+    /*fileslice_wolf->flags &= ~FILESLICE_COMPRESSION;
+    fileslice_wolf->flags |= FILESLICE_DECOMPRESSED;
+    fileslice_wolf->comp_size = fileslice_new->decomp_size;*/
+    
+    for (int i = 0; i < folderchunk_new->files; i++)
+    {
+        int fileslice_index = new_fileslice_idx+i;
+        file_slice* fileslice = &off4_structs.fileslice_entries[fileslice_index];
+        
+        if (fileslice->flags & FILESLICE_REDIR)
+        {
+            fileslice_index += (fileslice->flags & FILESLICE_TREE_IDX_MASK);
+            fileslice = &off4_structs.fileslice_entries[fileslice_index];
+        }
+        
+        uint64_t comp = fileslice->comp_size;
+        uint64_t decomp = fileslice->decomp_size;
+        uint64_t comp_aligned = (comp + 0x7) & ~0x7;
+        uint64_t decomp_aligned = (decomp + 0x7f) & ~0x7f;
+
+        printf("    %x: %llx %llx %llx %x %llx\n", fileslice_index, fileslice->offset * 4, decomp, comp, fileslice->flags, comp_aligned);
+        
+        if (fileslice->flags & FILESLICE_COMPRESSION)
+        {
+            folderchunk_new->memory_size += decomp_aligned;
+            folderchunk_new->file_size += comp_aligned;
+        }
+        else
+        {
+            folderchunk_new->memory_size += comp_aligned;
+            folderchunk_new->file_size += comp_aligned;
+        }
+    }
+    
+    printf("%llx %llx\n", folderchunk_new->memory_size, folderchunk_new->file_size);
+    
+    print_file_tree_entry(wolf);
+    print_fileslice(fileslice_new);
+    print_folder_tree_entry(bighash_new);
+    print_folder_chunk(folderchunk_new);
+    print_entry_pair(&off4_structs.folder_hash_lookup[bighash_new->subfolderlookup_start_idx + 1]);
 }
 
 int main(int argc, char** argv)
@@ -1127,18 +1184,9 @@ int main(int argc, char** argv)
         printf("%s <data.arc>\n", argv[0]);
         return -1;
     }
-    
-    std::ifstream strings("hashstrings.txt");
-    
-    std::string line;
-    while (std::getline(strings, line))
-    {
-        uint64_t crc = hash40((const void*)line.c_str(), strlen(line.c_str()));
-        unhash[crc] = line;
-    }
-    
-    dstream = ZSTD_createDStream();
-    size_t const initResult = ZSTD_initDStream(dstream);
+
+    hash40_store_init();
+    zstd_init();
     
     char* fname = argv[1];
     arc_file = fopen(argv[1], "rb");
@@ -1226,16 +1274,16 @@ int main(int argc, char** argv)
     {
         printf("Offset 4 Header:\n");
         printf("Total size: %08x\n", off4_structs.header->total_size);
-        printf("Big hash entries: %08x\n", off4_structs.header->entries_big);
-        printf("Big files 1: %08x\n", off4_structs.header->entries_bigfiles_1);
-        printf("File Tree Entries: %08x\n", off4_structs.header->tree_entries);
+        printf("Folder tree entries: %08x\n", off4_structs.header->folder_tree_entries);
+        printf("Folder chunks 1: %08x\n", off4_structs.header->entries_folderchunks_1);
+        printf("File Tree Entries: %08x\n", off4_structs.header->file_tree_entries);
         
-        printf("Suboffset entries: %08x\n", off4_structs.header->suboffset_entries);
+        printf("Fileslice entries: %08x\n", off4_structs.header->fileslice_entries);
         printf("File lookup entries: %08x\n", off4_structs.header->file_lookup_entries);
         printf("Folder hash entries: %08x\n", off4_structs.header->folder_hash_entries);
-        printf("File Tree Entries 2: %08x\n", off4_structs.header->tree_entries_2);
-        printf("Big files 2: %08x\n", off4_structs.header->entries_bigfiles_2);
-        printf("Post-suboffset entries: %08x\n", off4_structs.header->post_suboffset_entries);
+        printf("File Tree Entries 2: %08x\n", off4_structs.header->file_tree_entries_2);
+        printf("Folder chunks 2: %08x\n", off4_structs.header->entries_folderchunks_2);
+        printf("Post-fileslice entries: %08x\n", off4_structs.header->post_fileslice_entries);
         printf("Default alloc alignment: %08x\n", off4_structs.header->alloc_alignment);
         printf("Unk 10: %08x\n", off4_structs.header->unk10);
         printf("Unk 11: %08x\n\n", off4_structs.header->unk11);
@@ -1248,16 +1296,16 @@ int main(int argc, char** argv)
         printf("Total size: %08x\n", off4_structs.header_200->total_size);
         printf("File lookup entries: %08x\n", off4_structs.header_200->file_lookup_entries);
         printf("Unk08: %08x\n", off4_structs.header_200->unk08);
-        printf("Big hash entries: %08x\n", off4_structs.header_200->entries_big);
+        printf("Folder tree entries: %08x\n", off4_structs.header_200->folder_tree_entries);
         
-        printf("Big files 1: %08x\n", off4_structs.header_200->entries_bigfiles_1);
+        printf("Folder chunks 1: %08x\n", off4_structs.header_200->entries_folderchunks_1);
         printf("Folder hash entries: %08x\n", off4_structs.header_200->folder_hash_entries);
         printf("Unk18: %08x\n", off4_structs.header_200->unk18);
         printf("Unk1C: %08x\n", off4_structs.header_200->unk1C);
         
-        printf("Suboffset entries: %08x\n", off4_structs.header_200->suboffset_entries);
-        printf("Big files 2: %08x\n", off4_structs.header_200->entries_bigfiles_2);
-        printf("Post-suboffset entries: %08x\n", off4_structs.header_200->post_suboffset_entries);
+        printf("Fileslice entries: %08x\n", off4_structs.header_200->fileslice_entries);
+        printf("Folder chunks 2: %08x\n", off4_structs.header_200->entries_folderchunks_2);
+        printf("Post-fileslice entries: %08x\n", off4_structs.header_200->post_fileslice_entries);
         printf("Unk2C: %08x\n", off4_structs.header_200->unk2C);
         
         printf("Default alloc alignment: %08x\n", off4_structs.header_200->alloc_alignment);
@@ -1290,7 +1338,7 @@ int main(int argc, char** argv)
     printf("Number table entries: %08x\n", off4_structs.ext_header->entries_2);
     printf("Num files: %08x\n\n", off4_structs.ext_header->num_files);
     
-    //expand_subfiles_bighash_bigfile();
+    //expand_fileslices_foldertree_folderchunk();
     
     // Sample lookup
     dump_file("prebuilt:/nro/release/lua2cpp_wolf.nro");
@@ -1446,7 +1494,7 @@ int main(int argc, char** argv)
         {
     #ifdef VERBOSE_PRINT
             printf("%06x: ", i);
-            print_folder_tree_entry(&off5_structs.folder_tree[i]);
+            print_mini_folder_tree_entry(&off5_structs.folder_tree[i]);
     #endif
         }
         
@@ -1470,7 +1518,7 @@ int main(int argc, char** argv)
         for (int i = 0; i < off5_structs.header->file_entries; i++)
         {
     #ifdef VERBOSE_PRINT
-            print_mini_tree_entry(&off5_structs.tree_entries[i]);
+            print_mini_file_tree_entry(&off5_structs.file_tree_entries[i]);
     #endif
         }
 
@@ -1478,6 +1526,6 @@ int main(int argc, char** argv)
     }
     free(off4_structs.off4_data);
     
-    ZSTD_freeDStream(dstream);
+    zstd_deinit();
     fclose(arc_file);
 }
